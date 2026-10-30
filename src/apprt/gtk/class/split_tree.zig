@@ -144,6 +144,8 @@ pub const SplitTree = extern struct {
     };
 
     const Private = struct {
+        const focus_history_max = 32;
+
         /// The tree datastructure containing all of our surface views.
         tree: ?*Surface.Tree,
 
@@ -153,6 +155,10 @@ pub const SplitTree = extern struct {
         /// Last focused surface in the tree. We need this to handle various
         /// tree change states.
         last_focused: WeakRef(Surface) = .empty,
+
+        /// Recently focused surfaces, oldest first. These are strong
+        /// references bounded by focus_history_max.
+        focus_history: std.ArrayListUnmanaged(*Surface) = .empty,
 
         /// The source that we use to rebuild the tree. This is also
         /// used to debounce updates.
@@ -189,6 +195,65 @@ pub const SplitTree = extern struct {
         };
 
         _ = ext.actions.addAsGroup(Self, self, "split-tree", &actions);
+    }
+
+    fn recordFocus(self: *Self, surface: *Surface) void {
+        const priv = self.private();
+        priv.last_focused.set(surface);
+
+        var i: usize = 0;
+        while (i < priv.focus_history.items.len) {
+            const existing = priv.focus_history.items[i];
+            if (existing != surface) {
+                i += 1;
+                continue;
+            }
+
+            _ = priv.focus_history.orderedRemove(i);
+            existing.unref();
+        }
+
+        _ = surface.ref();
+        priv.focus_history.append(
+            Application.default().allocator(),
+            surface,
+        ) catch |err| {
+            surface.unref();
+            log.warn("unable to record split focus history: {}", .{err});
+            return;
+        };
+
+        while (priv.focus_history.items.len > Private.focus_history_max) {
+            priv.focus_history.items[0].unref();
+            _ = priv.focus_history.orderedRemove(0);
+        }
+    }
+
+    fn forgetFocus(self: *Self, surface: *Surface) void {
+        const history = &self.private().focus_history;
+        var i: usize = 0;
+        while (i < history.items.len) {
+            const existing = history.items[i];
+            if (existing != surface) {
+                i += 1;
+                continue;
+            }
+
+            _ = history.orderedRemove(i);
+            existing.unref();
+        }
+    }
+
+    fn recentFocus(self: *Self, buffer: *[Private.focus_history_max]*Surface) usize {
+        const items = self.private().focus_history.items;
+        var count: usize = 0;
+        var i = items.len;
+        while (i > 0 and count < buffer.len) {
+            i -= 1;
+            buffer[count] = items[i];
+            count += 1;
+        }
+        return count;
     }
 
     /// Create a new split in the given direction from the currently
@@ -243,11 +308,8 @@ pub const SplitTree = extern struct {
         defer single_tree.deinit();
 
         // We want to move our focus to the new surface no matter what.
-        // But we need to be careful to restore state if we fail.
-        const old_last_focused = self.private().last_focused.get();
-        defer if (old_last_focused) |v| v.unref(); // unref strong ref from get
-        self.private().last_focused.set(surface);
-        errdefer self.private().last_focused.set(old_last_focused);
+        self.recordFocus(surface);
+        errdefer self.forgetFocus(surface);
 
         // If we have no tree yet, then this becomes our tree and we're done.
         const old_tree = self.getTree() orelse {
@@ -327,10 +389,14 @@ pub const SplitTree = extern struct {
     pub fn goto(self: *Self, to: Surface.Tree.Goto) bool {
         const tree = self.getTree() orelse return false;
         const active = self.getActiveSurfaceHandle() orelse return false;
-        const target = if (tree.goto(
+        var recent_buffer: [Private.focus_history_max]*Surface = undefined;
+        const recent_count = self.recentFocus(&recent_buffer);
+        const recent: []const *const Surface = recent_buffer[0..recent_count];
+        const target = if (tree.gotoWithHistory(
             Application.default().allocator(),
             active,
             to,
+            recent,
         )) |handle_|
             handle_ orelse return false
         else |err| switch (err) {
@@ -347,14 +413,10 @@ pub const SplitTree = extern struct {
         const surface = tree.nodes[target.idx()].leaf;
         surface.grabFocus();
 
-        // We also need to setup our last_focused to this because if we
+        // We also need to set our focus history to this because if we
         // trigger a tree change like below, the grab focus above never
-        // actually triggers in time to set this and this ensures we
-        // grab focus to the right thing.
-        const old_last_focused = self.private().last_focused.get();
-        defer if (old_last_focused) |v| v.unref(); // unref strong ref from get
-        self.private().last_focused.set(surface);
-        errdefer self.private().last_focused.set(old_last_focused);
+        // actually triggers in time to record this.
+        self.recordFocus(surface);
 
         if (tree.zoomed != null) {
             const app = Application.default();
@@ -565,6 +627,8 @@ pub const SplitTree = extern struct {
     fn dispose(self: *Self) callconv(.c) void {
         const priv = self.private();
         priv.last_focused.set(null);
+        for (priv.focus_history.items) |surface| surface.unref();
+        priv.focus_history.deinit(Application.default().allocator());
         if (priv.rebuild_source) |v| {
             if (glib.Source.remove(v) == 0) {
                 log.warn("unable to remove rebuild source", .{});
@@ -721,6 +785,7 @@ pub const SplitTree = extern struct {
         // always the "previous" surface unless we're the leftmost then
         // its the next.
         const old_tree = self.getTree() orelse return;
+        self.forgetFocus(old_tree.nodes[handle.idx()].leaf);
         const next_focus: ?*Surface = next_focus: {
             const alloc = Application.default().allocator();
             const next_handle: Surface.Tree.Node.Handle =
@@ -748,7 +813,7 @@ pub const SplitTree = extern struct {
 
         // Grab focus. We have to set this on the "last focused" because our
         // focus will be set when the tree is redrawn.
-        if (next_focus) |v| priv.last_focused.set(v);
+        if (next_focus) |v| self.recordFocus(v);
     }
 
     fn propSurfaceFocused(
@@ -760,7 +825,7 @@ pub const SplitTree = extern struct {
         // the last focused surface. We let the weakref clear itself when
         // the surface is destroyed.
         if (!surface.getFocused()) return;
-        self.private().last_focused.set(surface);
+        self.recordFocus(surface);
 
         // Our active surface probably changed
         self.as(gobject.Object).notifyByPspec(properties.@"active-surface".impl.param_spec);

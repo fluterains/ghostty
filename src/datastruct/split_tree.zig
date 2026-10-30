@@ -256,6 +256,18 @@ pub fn SplitTree(comptime V: type) type {
             from: Node.Handle,
             to: Goto,
         ) Allocator.Error!?Node.Handle {
+            return self.gotoWithHistory(alloc, from, to, &.{});
+        }
+
+        /// Like goto, but spatial movement prefers overlapping candidates
+        /// in the supplied focus history. History is ordered newest first.
+        pub fn gotoWithHistory(
+            self: *const Self,
+            alloc: Allocator,
+            from: Node.Handle,
+            to: Goto,
+            recent: []const *const V,
+        ) Allocator.Error!?Node.Handle {
             return switch (to) {
                 .previous => self.previous(from),
                 .next => self.next(from),
@@ -265,7 +277,7 @@ pub fn SplitTree(comptime V: type) type {
                     // Get our spatial representation.
                     var sp = try self.spatial(alloc);
                     defer sp.deinit(alloc);
-                    break :spatial self.nearestWrapped(sp, from, d);
+                    break :spatial self.nearestWrapped(sp, from, d, recent);
                 },
             };
         }
@@ -393,11 +405,13 @@ pub fn SplitTree(comptime V: type) type {
             from: Node.Handle,
             direction: Spatial.Direction,
             target: Spatial.Slot,
+            recent: []const *const V,
         ) ?Node.Handle {
             var result: ?struct {
                 handle: Node.Handle,
-                distance: f16,
+                score: Spatial.Score,
             } = null;
+            const current = sp.slots[from.idx()];
             for (sp.slots, 0..) |slot, handle| {
                 // Never match ourself
                 if (handle == from.idx()) continue;
@@ -407,27 +421,34 @@ pub fn SplitTree(comptime V: type) type {
                     .leaf => {},
                     .split => continue,
                 }
+                const leaf = self.nodes[handle].leaf;
 
-                // Ensure it is in the proper direction
+                // Require a shared neighboring edge with positive overlap
+                // along that edge.
                 if (!switch (direction) {
-                    .left => slot.maxX() <= target.x,
-                    .right => slot.x >= target.maxX(),
-                    .up => slot.maxY() <= target.y,
-                    .down => slot.y >= target.maxY(),
+                    .left => Spatial.edgesTouch(slot.maxX(), target.x) and
+                        Spatial.verticalOverlap(slot, current),
+                    .right => Spatial.edgesTouch(slot.x, target.maxX()) and
+                        Spatial.verticalOverlap(slot, current),
+                    .up => Spatial.edgesTouch(slot.maxY(), target.y) and
+                        Spatial.horizontalOverlap(slot, current),
+                    .down => Spatial.edgesTouch(slot.y, target.maxY()) and
+                        Spatial.horizontalOverlap(slot, current),
                 }) continue;
 
-                // Track our distance
-                const dx = slot.x - target.x;
-                const dy = slot.y - target.y;
-                const distance = @sqrt(dx * dx + dy * dy);
+                const candidate = Spatial.score(
+                    target,
+                    slot,
+                    recentRank(leaf, recent),
+                );
 
-                // If we have a nearest it must be closer.
+                // Prefer aligned neighbors before considering raw distance.
                 if (result) |n| {
-                    if (distance >= n.distance) continue;
+                    if (!candidate.isBetter(n.score)) continue;
                 }
                 result = .{
                     .handle = @enumFromInt(handle),
-                    .distance = distance,
+                    .score = candidate,
                 };
             }
 
@@ -440,6 +461,7 @@ pub fn SplitTree(comptime V: type) type {
             sp: Spatial,
             from: Node.Handle,
             direction: Spatial.Direction,
+            recent: []const *const V,
         ) ?Node.Handle {
             // If we can find a nearest value without wrapping, then
             // use that.
@@ -449,6 +471,7 @@ pub fn SplitTree(comptime V: type) type {
                 from,
                 direction,
                 target,
+                recent,
             )) |v| return v;
 
             // The spatial grid is normalized to 1x1, so wrapping is modeled
@@ -470,7 +493,15 @@ pub fn SplitTree(comptime V: type) type {
                 from,
                 direction,
                 target,
+                recent,
             );
+        }
+
+        fn recentRank(leaf: *const V, recent: []const *const V) ?usize {
+            for (recent, 0..) |item, rank| {
+                if (item == leaf) return rank;
+            }
+            return null;
         }
 
         /// Resize the given node in place. The node MUST be a split (asserted).
@@ -928,6 +959,23 @@ pub fn SplitTree(comptime V: type) type {
 
             pub const Direction = enum { left, right, down, up };
 
+            const Score = struct {
+                recent_rank: ?usize,
+                distance: f16,
+
+                fn isBetter(self: Score, other: Score) bool {
+                    if (self.recent_rank) |self_rank| {
+                        if (other.recent_rank) |other_rank| {
+                            return self_rank < other_rank;
+                        }
+                        return true;
+                    }
+
+                    if (other.recent_rank != null) return false;
+                    return self.distance < other.distance;
+                }
+            };
+
             const Slot = struct {
                 x: f16,
                 y: f16,
@@ -942,6 +990,33 @@ pub fn SplitTree(comptime V: type) type {
                     return self.y + self.height;
                 }
             };
+
+            const edge_tolerance: f16 = 1.0 / 1024.0;
+
+            fn edgesTouch(a: f16, b: f16) bool {
+                return @abs(a - b) <= edge_tolerance;
+            }
+
+            fn horizontalOverlap(a: Slot, b: Slot) bool {
+                return a.x < b.maxX() and a.maxX() > b.x;
+            }
+
+            fn verticalOverlap(a: Slot, b: Slot) bool {
+                return a.y < b.maxY() and a.maxY() > b.y;
+            }
+
+            fn score(
+                target: Slot,
+                candidate: Slot,
+                recent_rank: ?usize,
+            ) Score {
+                const dx = candidate.x - target.x;
+                const dy = candidate.y - target.y;
+                return .{
+                    .recent_rank = recent_rank,
+                    .distance = @sqrt(dx * dx + dy * dy),
+                };
+            }
 
             pub fn deinit(self: *Spatial, alloc: Allocator) void {
                 alloc.free(self.slots);
@@ -2012,6 +2087,33 @@ test "SplitTree: spatial goto" {
         )).?;
         const view = split.nodes[target.idx()].leaf;
         try testing.expectEqualStrings("A", view.label);
+    }
+
+    // Spatial D => left using focus history
+    {
+        const recent_view: *const TestView = recent: {
+            var it = split.iterator();
+            break :recent while (it.next()) |entry| {
+                if (std.mem.eql(u8, entry.view.label, "C")) {
+                    break :recent entry.view;
+                }
+            } else return error.NotFound;
+        };
+        const target = (try split.gotoWithHistory(
+            alloc,
+            from: {
+                var it = split.iterator();
+                break :from while (it.next()) |entry| {
+                    if (std.mem.eql(u8, entry.view.label, "D")) {
+                        break entry.handle;
+                    }
+                } else return error.NotFound;
+            },
+            .{ .spatial = .left },
+            &.{recent_view},
+        )).?;
+        const view = split.nodes[target.idx()].leaf;
+        try testing.expectEqualStrings("C", view.label);
     }
 
     // Spatial A => left (wrapped)

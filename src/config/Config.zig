@@ -4599,6 +4599,7 @@ fn layoutNameFromPath(alloc: Allocator, path: []const u8) ![:0]const u8 {
         out_len = fallback.len;
     }
 
+    output[out_len] = 0;
     return output[0..out_len :0];
 }
 
@@ -11008,6 +11009,10 @@ test "layout CLI derives a safe name from a file path" {
     try testing.expectEqualStrings(
         "my-desk-layout",
         try layoutNameFromPath(alloc, "/tmp/My Desk.layout.json"),
+    );
+    try testing.expectEqualStrings(
+        "a",
+        try layoutNameFromPath(alloc, "/tmp/a.json"),
     );
 }
 

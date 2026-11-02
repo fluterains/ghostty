@@ -80,7 +80,7 @@ ENV PATH=/opt/blueprint/bin:${PATH}
 
 FROM toolchain AS builder
 
-ARG GHOSTTY_VERSION=1.3.1-patched.1
+ARG GHOSTTY_VERSION=1.3.1-patched.2
 
 WORKDIR /src
 COPY . /src
@@ -101,7 +101,8 @@ RUN --mount=type=cache,id=ghostty-zig-global-v3,target=/var/cache/zig \
 # origin-relative RUNPATH so the package never contains a build-machine path.
 RUN patchelf --set-rpath '$ORIGIN/../lib' /out/usr/bin/ghostty && \
     install -Dm644 LICENSE /out/usr/share/doc/ghostty/LICENSE && \
-    install -Dm644 PATCH1.md /out/usr/share/doc/ghostty/PATCH1.md
+    install -Dm644 PATCH1.md /out/usr/share/doc/ghostty/PATCH1.md && \
+    install -Dm644 PATCH2.md /out/usr/share/doc/ghostty/PATCH2.md
 
 COPY dist/linux/docker/control.in /tmp/control.in
 COPY dist/linux/docker/postinst /tmp/debian-postinst
@@ -119,7 +120,7 @@ RUN mkdir -p /out/DEBIAN && \
 
 FROM builder AS test
 
-ARG GHOSTTY_VERSION=1.3.1-patched.1
+ARG GHOSTTY_VERSION=1.3.1-patched.2
 
 RUN --mount=type=cache,id=ghostty-zig-global-v3,target=/var/cache/zig \
     --mount=type=cache,id=ghostty-zig-local-v4,target=/src/.zig-cache \

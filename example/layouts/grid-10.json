@@ -1,0 +1,83 @@
+{
+  "type": "window",
+  "children": [
+    {
+      "type": "tab",
+      "children": [
+        {
+          "type": "split",
+          "direction": "vertical",
+          "ratio": 0.5,
+          "children": [
+            {
+              "type": "split",
+              "direction": "vertical",
+              "ratio": 0.5,
+              "children": [
+                {
+                  "type": "split",
+                  "direction": "horizontal",
+                  "ratio": 0.25,
+                  "children": [
+                    {"type": "terminal"},
+                    {
+                      "type": "split",
+                      "direction": "horizontal",
+                      "ratio": 0.3333334,
+                      "children": [
+                        {"type": "terminal"},
+                        {
+                          "type": "split",
+                          "direction": "horizontal",
+                          "ratio": 0.5,
+                          "children": [
+                            {"type": "terminal"},
+                            {"type": "terminal"}
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "split",
+                  "direction": "horizontal",
+                  "ratio": 0.25,
+                  "children": [
+                    {"type": "terminal"},
+                    {
+                      "type": "split",
+                      "direction": "horizontal",
+                      "ratio": 0.3333334,
+                      "children": [
+                        {"type": "terminal"},
+                        {
+                          "type": "split",
+                          "direction": "horizontal",
+                          "ratio": 0.5,
+                          "children": [
+                            {"type": "terminal"},
+                            {"type": "terminal"}
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "split",
+              "direction": "horizontal",
+              "ratio": 0.5,
+              "children": [
+                {"type": "terminal"},
+                {"type": "terminal"}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

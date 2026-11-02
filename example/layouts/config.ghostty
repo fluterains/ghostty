@@ -1,0 +1,3 @@
+window-layout = dev=./dev.json
+window-layout-default = dev
+keybind = ctrl+shift+l=new_tab_with_layout:dev

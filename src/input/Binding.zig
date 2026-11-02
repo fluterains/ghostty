@@ -534,6 +534,9 @@ pub const Action = union(enum) {
     /// Open a new tab.
     new_tab,
 
+    /// Open a new tab using a named window layout from the configuration.
+    new_tab_with_layout: []const u8,
+
     /// Go to the previous tab.
     previous_tab,
 
@@ -1377,6 +1380,7 @@ pub const Action = union(enum) {
             // come from. For example `new_window` needs to be sourced to
             // a surface so inheritance can be done correctly.
             .new_tab,
+            .new_tab_with_layout,
             .previous_tab,
             .next_tab,
             .last_tab,
@@ -3313,6 +3317,11 @@ test "parse: action with string" {
         const binding = try parseSingle("a=set_tab_title:tab");
         try testing.expect(binding.action == .set_tab_title);
         try testing.expectEqualStrings("tab", binding.action.set_tab_title);
+    }
+    {
+        const binding = try parseSingle("a=new_tab_with_layout:dev");
+        try testing.expect(binding.action == .new_tab_with_layout);
+        try testing.expectEqualStrings("dev", binding.action.new_tab_with_layout);
     }
 }
 

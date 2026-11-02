@@ -8,6 +8,7 @@ const gobject = @import("gobject");
 const gtk = @import("gtk");
 
 const configpkg = @import("../../../config.zig");
+const WindowLayout = @import("../../../config/window_layout.zig");
 const apprt = @import("../../../apprt.zig");
 const ext = @import("../ext.zig");
 const gresource = @import("../build/gresource.zig");
@@ -371,6 +372,151 @@ pub const SplitTree = extern struct {
         // succeeded. This keeps the previous focus state intact on failure.
         self.recordFocus(surface);
         self.setTree(&new_tree);
+    }
+
+    pub const LayoutError = Allocator.Error || error{
+        InvalidTabLayout,
+        InvalidLayoutNode,
+    };
+
+    /// Build a complete split tree from a configured layout and install it
+    /// atomically. The layout must resolve to exactly one tab.
+    pub fn newLayout(
+        self: *Self,
+        layout: *const WindowLayout.Node,
+        overrides: struct {
+            command: ?configpkg.Command = null,
+            working_directory: ?[:0]const u8 = null,
+            title: ?[:0]const u8 = null,
+
+            pub const none: @This() = .{};
+        },
+    ) LayoutError!void {
+        const tab_layout = switch (layout.*) {
+            .window => |container| window: {
+                if (container.children.len != 1) return error.InvalidTabLayout;
+                const child = container.children[0];
+                break :window switch (child.*) {
+                    .tab => child,
+                    else => return error.InvalidTabLayout,
+                };
+            },
+            .tab => layout,
+            .split, .terminal => layout,
+        };
+
+        const alloc = Application.default().allocator();
+        var scratch_arena = std.heap.ArenaAllocator.init(alloc);
+        defer scratch_arena.deinit();
+
+        var built = try self.buildLayoutNode(
+            scratch_arena.allocator(),
+            tab_layout,
+            overrides,
+        );
+        defer built.tree.deinit();
+
+        // Every new Surface starts focused so a normal, single-surface split
+        // is immediately usable. In a bulk-loaded layout, however, GTK will
+        // only realize one of them as focused; the others would retain the
+        // default flag and continue blinking their cursors. Set the complete
+        // initial state before installing the tree.
+        const focus = built.focus orelse built.first orelse return error.InvalidLayoutNode;
+        var layout_it = built.tree.iterator();
+        while (layout_it.next()) |entry| {
+            entry.view.setInitialFocused(entry.view == focus);
+        }
+
+        self.setTree(&built.tree);
+        self.recordFocus(focus);
+        focus.grabFocus();
+    }
+
+    const BuiltLayout = struct {
+        tree: Surface.Tree,
+        focus: ?*Surface = null,
+        first: ?*Surface = null,
+    };
+
+    fn buildLayoutNode(
+        self: *Self,
+        scratch_alloc: Allocator,
+        node: *const WindowLayout.Node,
+        overrides: anytype,
+    ) LayoutError!BuiltLayout {
+        return switch (node.*) {
+            .terminal => |terminal| terminal: {
+                var command: ?configpkg.Command = null;
+                if (terminal.command) |raw| {
+                    var parsed: configpkg.Command = undefined;
+                    parsed.parseCLI(scratch_alloc, raw) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.ValueRequired => return error.InvalidLayoutNode,
+                    };
+                    command = parsed;
+                }
+
+                const surface: *Surface = .new(.{
+                    .command = command orelse overrides.command,
+                    .working_directory = terminal.working_directory orelse overrides.working_directory,
+                    .title = terminal.title orelse overrides.title,
+                });
+                errdefer surface.unref();
+                _ = surface.refSink();
+
+                _ = self.as(gobject.Object).bindProperty(
+                    "is-split",
+                    surface.as(gobject.Object),
+                    "is-split",
+                    .{ .sync_create = true },
+                );
+
+                const alloc = Application.default().allocator();
+                var tree = try Surface.Tree.init(alloc, surface);
+                errdefer tree.deinit();
+                surface.unref();
+
+                break :terminal .{
+                    .tree = tree,
+                    .focus = if (terminal.focus) surface else null,
+                    .first = surface,
+                };
+            },
+
+            .split => |split| split: {
+                var first = try self.buildLayoutNode(scratch_alloc, split.first, overrides);
+                errdefer first.tree.deinit();
+                var second = try self.buildLayoutNode(scratch_alloc, split.second, overrides);
+                defer second.tree.deinit();
+
+                const alloc = Application.default().allocator();
+                var tree = try Surface.Tree.join(
+                    &first.tree,
+                    &second.tree,
+                    alloc,
+                    switch (split.direction) {
+                        .horizontal => .horizontal,
+                        .vertical => .vertical,
+                    },
+                    split.ratio,
+                );
+                errdefer tree.deinit();
+                first.tree.deinit();
+
+                break :split .{
+                    .tree = tree,
+                    .focus = first.focus orelse second.focus,
+                    .first = first.first orelse second.first,
+                };
+            },
+
+            .tab => |container| container: {
+                if (container.children.len != 1) return error.InvalidTabLayout;
+                break :container self.buildLayoutNode(scratch_alloc, container.children[0], overrides);
+            },
+
+            .window => error.InvalidTabLayout,
+        };
     }
 
     pub fn resize(

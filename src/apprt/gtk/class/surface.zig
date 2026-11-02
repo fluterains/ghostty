@@ -2018,6 +2018,17 @@ pub const Surface = extern struct {
         return self.private().focused;
     }
 
+    /// Set the initial focus state before the surface is realized. This is for
+    /// surfaces created in bulk, such as configured window layouts. Only one
+    /// surface in the layout may start focused; GTK focus events will update
+    /// the state normally after the widget hierarchy is attached.
+    pub fn setInitialFocused(self: *Self, focused: bool) void {
+        const priv = self.private();
+        if (priv.focused == focused) return;
+        priv.focused = focused;
+        self.as(gobject.Object).notifyByPspec(properties.focused.impl.param_spec);
+    }
+
     /// Change the configuration for this surface.
     pub fn setConfig(self: *Self, config: *Config) void {
         const priv = self.private();
@@ -3419,6 +3430,15 @@ pub const Surface = extern struct {
 
         // Store it!
         priv.core_surface = surface;
+
+        // The core Surface assumes it starts focused. During a bulk layout
+        // load this GTK widget may already have been marked unfocused, so sync
+        // that initial state before the surface starts rendering. Otherwise
+        // every pane blinks its cursor until it happens to receive a GTK focus
+        // event.
+        surface.focusCallback(priv.focused) catch |err| {
+            log.warn("error applying initial surface focus err={}", .{err});
+        };
 
         // Emit the signal that we initialized the surface.
         Surface.signals.init.impl.emit(

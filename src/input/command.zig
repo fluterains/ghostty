@@ -419,6 +419,8 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Open a new tab.",
         }},
 
+        .new_tab_with_layout => comptime &.{},
+
         .move_tab => comptime &.{
             .{
                 .action = .{ .move_tab = -1 },

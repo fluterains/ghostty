@@ -1,0 +1,3 @@
+window-layout = grid10=./grid-10.json
+window-layout-default = grid10
+maximize = true

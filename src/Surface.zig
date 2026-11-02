@@ -5609,6 +5609,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             {},
         ),
 
+        .new_tab_with_layout => |name| return try self.rt_app.performAction(
+            .{ .surface = self },
+            .new_tab_with_layout,
+            .{ .name = name },
+        ),
+
         .close_tab => |v| return try self.rt_app.performAction(
             .{ .surface = self },
             .close_tab,

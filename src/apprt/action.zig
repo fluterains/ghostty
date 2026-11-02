@@ -343,6 +343,9 @@ pub const Action = union(Key) {
     /// otherwise the terminal-set title.
     copy_title_to_clipboard,
 
+    /// Open a new tab using a named layout from the user configuration.
+    new_tab_with_layout: NewTabWithLayout,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -410,6 +413,7 @@ pub const Action = union(Key) {
         search_selected,
         readonly,
         copy_title_to_clipboard,
+        new_tab_with_layout,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -514,6 +518,20 @@ pub const GotoSplit = enum(c_int) {
 
     test "ghostty.h GotoSplit" {
         try lib.checkGhosttyHEnum(GotoSplit, "GHOSTTY_GOTO_SPLIT_");
+    }
+};
+
+pub const NewTabWithLayout = struct {
+    name: []const u8,
+
+    // Sync with: ghostty_action_new_tab_with_layout_s
+    pub const C = extern struct {
+        name: [*]const u8,
+        len: usize,
+    };
+
+    pub fn cval(self: NewTabWithLayout) C {
+        return .{ .name = self.name.ptr, .len = self.name.len };
     }
 };
 

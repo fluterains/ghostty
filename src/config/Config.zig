@@ -35,6 +35,7 @@ const help_strings = @import("help_strings");
 pub const Command = @import("command.zig").Command;
 const RepeatableReadableIO = @import("io.zig").RepeatableReadableIO;
 const RepeatableStringMap = @import("RepeatableStringMap.zig");
+const WindowLayout = @import("window_layout.zig");
 pub const Path = @import("path.zig").Path;
 pub const RepeatablePath = @import("path.zig").RepeatablePath;
 const ClipboardCodepointMap = @import("ClipboardCodepointMap.zig");
@@ -2225,6 +2226,36 @@ keybind: Keybinds = .{},
 /// This is currently only supported on macOS. This has no effect on Linux.
 @"window-save-state": WindowSaveState = .default,
 
+/// Named window layout templates.
+///
+/// The value is `name=path`, where the path points to a JSON layout file. The
+/// layout file describes a tree of windows, tabs, splits, and terminals. Layout
+/// files are loaded relative to the configuration file that references them.
+///
+///     window-layout = dev=./layouts/dev.json
+///     window-layout-default = dev
+///
+/// Configured layout creation is currently implemented by the GTK app runtime.
+@"window-layout": WindowLayout.Registry = .{},
+
+/// The default layout used by new windows and tabs. If unset, Ghostty creates
+/// its normal single terminal instead.
+@"window-layout-default": ?[:0]const u8 = null,
+
+/// Launch with a named layout. This is a command-line convenience alias for
+/// `window-layout-default` and ensures that the requested layout is honored by
+/// this invocation.
+layout: ?[:0]const u8 = null,
+
+/// Launch directly with a JSON layout file. The file is registered under the
+/// name from `--layout-name`, or a name derived from the file name. If no
+/// `--layout` is supplied, the loaded file becomes this instance's default
+/// layout.
+@"layout-file": ?Path = null,
+
+/// Override the layout name used for `--layout-file`.
+@"layout-name": ?[:0]const u8 = null,
+
 /// Resize the window in discrete increments of the focused surface's cell size.
 /// If this is disabled, surfaces are resized in pixel increments. Currently
 /// only supported on macOS.
@@ -4359,6 +4390,14 @@ fn expandPaths(self: *Config, base: []const u8) !void {
 
     // Expand all of our paths
     inline for (@typeInfo(Config).@"struct".fields) |field| {
+        if (field.type == WindowLayout.Registry) {
+            try @field(self, field.name).expand(
+                arena_alloc,
+                base,
+            );
+            continue;
+        }
+
         switch (field.type) {
             RepeatablePath, Path => {
                 try @field(self, field.name).expand(
@@ -4477,6 +4516,92 @@ fn loadTheme(self: *Config, theme: Theme) !void {
     self.* = new_config;
 }
 
+/// Install the convenience CLI layout options into the general layout registry.
+/// This gives command-line launches the same behavior as layouts declared in a
+/// configuration file without requiring a temporary config file.
+fn installCliLayout(self: *Config, alloc: Allocator) !void {
+    if (self.@"layout-file") |layout_file| {
+        const path = switch (layout_file) {
+            .optional, .required => |value| value,
+        };
+
+        if (path.len > 0) {
+            const name = if (self.@"layout-name") |value|
+                value
+            else
+                try layoutNameFromPath(alloc, path);
+
+            const optional = switch (layout_file) {
+                .optional => true,
+                .required => false,
+            };
+            self.@"window-layout".register(
+                alloc,
+                name,
+                path,
+                optional,
+            ) catch |err| {
+                try self.addDiagnosticFmt(
+                    "invalid layout file registration for {s}: {s}",
+                    .{ path, @errorName(err) },
+                );
+                return;
+            };
+
+            if (self.layout == null) self.layout = name;
+        }
+    } else if (self.@"layout-name" != null) {
+        try self.addDiagnosticFmt(
+            "layout-name requires layout-file",
+            .{},
+        );
+    }
+
+    if (self.layout) |name| {
+        self.@"window-layout-default" = name;
+
+        // A layout supplied on the command line applies to this invocation.
+        // A remote GTK application does not receive the new process's config,
+        // so use an independent instance instead of silently opening a normal
+        // window in the existing process.
+        self.@"gtk-single-instance" = .false;
+    }
+}
+
+fn layoutNameFromPath(alloc: Allocator, path: []const u8) ![:0]const u8 {
+    var source = std.fs.path.basename(path);
+    const extension = std.fs.path.extension(source);
+    if (std.ascii.eqlIgnoreCase(extension, ".json")) {
+        source = source[0 .. source.len - extension.len];
+    }
+
+    const output = try alloc.allocSentinel(
+        u8,
+        @max(@min(source.len, 64), "layout".len),
+        0,
+    );
+    var out_len: usize = 0;
+    for (source) |ch| {
+        if (out_len >= output.len) break;
+        const valid = std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_';
+        if (valid) {
+            output[out_len] = std.ascii.toLower(ch);
+            out_len += 1;
+        } else if (out_len == 0 or output[out_len - 1] != '-') {
+            output[out_len] = '-';
+            out_len += 1;
+        }
+    }
+
+    if (out_len == 0) {
+        const fallback = "layout";
+        @memcpy(output[0..fallback.len], fallback);
+        out_len = fallback.len;
+    }
+
+    return output[0..out_len :0];
+}
+
 /// Call this once after you are done setting configuration. This
 /// is idempotent but will waste memory if called multiple times.
 pub fn finalize(self: *Config) !void {
@@ -4502,6 +4627,14 @@ pub fn finalize(self: *Config) !void {
     }
 
     const alloc = self._arena.?.allocator();
+
+    // Layout files are read after all config files have been loaded so paths
+    // have already been expanded relative to the file that declared them.
+    try self.installCliLayout(alloc);
+    try self.@"window-layout".load(alloc, &self._diagnostics);
+    if (self.@"window-layout-default") |name| {
+        try self.@"window-layout".validateDefault(alloc, &self._diagnostics, name);
+    }
 
     // Used for a variety of defaults. See the function docs as well the
     // specific variable use sites for more details.
@@ -10860,4 +10993,74 @@ test "compatibility: window new-window" {
             cfg.@"macos-dock-drop-behavior",
         );
     }
+}
+
+test "layout CLI derives a safe name from a file path" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    try testing.expectEqualStrings(
+        "grid-10",
+        try layoutNameFromPath(alloc, "/tmp/grid-10.json"),
+    );
+    try testing.expectEqualStrings(
+        "my-desk-layout",
+        try layoutNameFromPath(alloc, "/tmp/My Desk.layout.json"),
+    );
+}
+
+test "layout CLI file registers and selects the layout" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    const arena = cfg._arena.?.allocator();
+    cfg.@"layout-file" = .{ .required = "/tmp/grid-10.json" };
+    try cfg.installCliLayout(arena);
+
+    try testing.expectEqualStrings("grid-10", cfg.layout.?);
+    try testing.expectEqualStrings("grid-10", cfg.@"window-layout-default".?);
+    try testing.expectEqual(GtkSingleInstance.false, cfg.@"gtk-single-instance");
+    try testing.expectEqual(@as(usize, 1), cfg.@"window-layout".count());
+    try testing.expectEqualStrings(
+        "/tmp/grid-10.json",
+        cfg.@"window-layout".iterator()[0].path,
+    );
+}
+
+test "layout CLI named layout uses an independent instance" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    cfg.layout = "dev";
+    try cfg.installCliLayout(cfg._arena.?.allocator());
+
+    try testing.expectEqualStrings("dev", cfg.@"window-layout-default".?);
+    try testing.expectEqual(GtkSingleInstance.false, cfg.@"gtk-single-instance");
+}
+
+test "layout CLI options parse through Config" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+
+    var it: TestIterator = .{ .data = &.{
+        "--layout-file=/tmp/grid-10.json",
+        "--layout-name=workspace",
+    } };
+    try cfg.loadIter(cfg._arena.?.allocator(), &it);
+    try cfg.installCliLayout(cfg._arena.?.allocator());
+
+    try testing.expectEqualStrings("workspace", cfg.layout.?);
+    try testing.expectEqualStrings("workspace", cfg.@"window-layout-default".?);
+    try testing.expectEqualStrings(
+        "workspace",
+        cfg.@"window-layout".iterator()[0].name,
+    );
 }

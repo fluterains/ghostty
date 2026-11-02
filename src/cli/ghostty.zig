@@ -11,6 +11,7 @@ const list_keybinds = @import("list_keybinds.zig");
 const list_themes = @import("list_themes.zig");
 const list_colors = @import("list_colors.zig");
 const list_actions = @import("list_actions.zig");
+const list_layouts = @import("list_layouts.zig");
 const ssh_cache = @import("ssh_cache.zig");
 const edit_config = @import("edit_config.zig");
 const show_config = @import("show_config.zig");
@@ -44,6 +45,9 @@ pub const Action = enum {
 
     /// List keybind actions
     @"list-actions",
+
+    /// List named window layouts from the current configuration
+    @"list-layouts",
 
     /// Manage SSH terminfo cache for automatic remote host setup
     @"ssh-cache",
@@ -139,6 +143,7 @@ pub const Action = enum {
             .@"list-themes" => try list_themes.run(alloc),
             .@"list-colors" => try list_colors.run(alloc),
             .@"list-actions" => try list_actions.run(alloc),
+            .@"list-layouts" => try list_layouts.run(alloc),
             .@"ssh-cache" => try ssh_cache.run(alloc),
             .@"edit-config" => try edit_config.run(alloc),
             .@"show-config" => try show_config.run(alloc),
@@ -178,6 +183,7 @@ pub const Action = enum {
                 .@"list-themes" => list_themes.Options,
                 .@"list-colors" => list_colors.Options,
                 .@"list-actions" => list_actions.Options,
+                .@"list-layouts" => list_layouts.Options,
                 .@"ssh-cache" => ssh_cache.Options,
                 .@"edit-config" => edit_config.Options,
                 .@"show-config" => show_config.Options,

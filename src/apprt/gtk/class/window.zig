@@ -389,7 +389,15 @@ pub const Window = extern struct {
     /// at the position dictated by the `window-new-tab-position` config.
     /// The new tab will be selected.
     pub fn newTab(self: *Self, parent_: ?*CoreSurface) void {
-        _ = self.newTabPage(parent_, .tab, .none);
+        _ = self.newTabPage(parent_, .tab, .none, null);
+    }
+
+    pub fn newTabWithLayout(
+        self: *Self,
+        parent_: ?*CoreSurface,
+        layout_name: []const u8,
+    ) void {
+        _ = self.newTabPage(parent_, .tab, .none, layout_name);
     }
 
     pub fn newTabForWindow(
@@ -411,6 +419,7 @@ pub const Window = extern struct {
                 .working_directory = overrides.working_directory,
                 .title = overrides.title,
             },
+            null,
         );
     }
 
@@ -425,6 +434,7 @@ pub const Window = extern struct {
 
             pub const none: @This() = .{};
         },
+        layout_name: ?[]const u8,
     ) *adw.TabPage {
         const priv: *Private = self.private();
         const tab_view = priv.tab_view;
@@ -437,6 +447,7 @@ pub const Window = extern struct {
                 .working_directory = overrides.working_directory,
                 .title = overrides.title,
             },
+            layout_name,
         );
 
         if (parent_) |p| {
@@ -1319,7 +1330,7 @@ pub const Window = extern struct {
         _: *adw.TabOverview,
         self: *Self,
     ) callconv(.c) *adw.TabPage {
-        return self.newTabPage(if (self.getActiveSurface()) |v| v.core() else null, .tab, .none);
+        return self.newTabPage(if (self.getActiveSurface()) |v| v.core() else null, .tab, .none, null);
     }
 
     fn tabOverviewOpen(

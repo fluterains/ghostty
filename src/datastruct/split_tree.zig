@@ -624,6 +624,27 @@ pub fn SplitTree(comptime V: type) type {
             };
         }
 
+        /// Combine two trees under a new root split. The first tree is placed
+        /// on the left/top and the second tree on the right/bottom.
+        pub fn join(
+            first: *const Self,
+            second: *const Self,
+            gpa: Allocator,
+            layout: Split.Layout,
+            ratio: f16,
+        ) Allocator.Error!Self {
+            return first.split(
+                gpa,
+                .root,
+                switch (layout) {
+                    .horizontal => .right,
+                    .vertical => .down,
+                },
+                ratio,
+                second,
+            );
+        }
+
         /// Remove a node from the tree.
         pub fn remove(
             self: *Self,
@@ -1754,6 +1775,35 @@ test "SplitTree: view equality supports copied views" {
 
     try testing.expect(TestTree.viewEql(&a, &b));
     try testing.expect(!TestTree.viewEql(&a, &c));
+}
+
+test "SplitTree: join preserves child order and ratio" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var v1: TestTree.View = .{ .label = "A" };
+    var t1: TestTree = try .init(alloc, &v1);
+    defer t1.deinit();
+    var v2: TestTree = blk: {
+        var view: TestTree.View = .{ .label = "B" };
+        break :blk try .init(alloc, &view);
+    };
+    defer v2.deinit();
+
+    var joined = try TestTree.join(&t1, &v2, alloc, .horizontal, 0.25);
+    defer joined.deinit();
+
+    const str = try std.fmt.allocPrint(alloc, "{f}", .{joined});
+    defer alloc.free(str);
+    try testing.expectEqualStrings(str,
+        \\+---++-------------+
+        \\| A ||      B      |
+        \\+---++-------------+
+        \\split (layout: horizontal, ratio: 0.25)
+        \\  leaf: A
+        \\  leaf: B
+        \\
+    );
 }
 
 test "SplitTree: split vertical" {

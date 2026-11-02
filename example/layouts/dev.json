@@ -1,0 +1,41 @@
+{
+  "type": "window",
+  "children": [
+    {
+      "type": "tab",
+      "children": [
+        {
+          "type": "split",
+          "direction": "horizontal",
+          "ratio": 0.65,
+          "children": [
+            {
+              "type": "terminal",
+              "title": "editor",
+              "command": "nvim",
+              "working_directory": "~"
+            },
+            {
+              "type": "split",
+              "direction": "vertical",
+              "ratio": 0.55,
+              "children": [
+                {
+                  "type": "terminal",
+                  "title": "server",
+                  "command": "npm run dev"
+                },
+                {
+                  "type": "terminal",
+                  "title": "tests",
+                  "command": "npm test",
+                  "focus": true
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

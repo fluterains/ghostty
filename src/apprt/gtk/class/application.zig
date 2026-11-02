@@ -704,6 +704,8 @@ pub const Application = extern struct {
 
             .new_tab => return Action.newTab(target),
 
+            .new_tab_with_layout => return Action.newTabWithLayout(target, value),
+
             .new_window => try Action.newWindow(
                 self,
                 switch (target) {
@@ -2213,6 +2215,31 @@ const Action = struct {
                     return false;
                 };
                 window.newTab(core);
+                return true;
+            },
+        }
+    }
+
+    pub fn newTabWithLayout(
+        target: apprt.Target,
+        value: apprt.action.NewTabWithLayout,
+    ) bool {
+        switch (target) {
+            .app => {
+                log.warn("new tab with layout to app is unexpected", .{});
+                return false;
+            },
+
+            .surface => |core| {
+                const surface = core.rt_surface.surface;
+                const window = ext.getAncestor(
+                    Window,
+                    surface.as(gtk.Widget),
+                ) orelse {
+                    log.warn("surface is not in a window, ignoring new_tab_with_layout", .{});
+                    return false;
+                };
+                window.newTabWithLayout(core, value.name);
                 return true;
             },
         }

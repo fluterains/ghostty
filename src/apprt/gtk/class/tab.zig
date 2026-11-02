@@ -174,17 +174,16 @@ pub const Tab = extern struct {
         pub var offset: c_int = 0;
     };
 
-    /// Set the parent of this tab page. This only affects the first surface
-    /// ever created for a tab. If a surface was already created this does
-    /// nothing.
+    /// Set the inheritance parent for every surface that has not yet been
+    /// realized in this tab.
     pub fn setParent(self: *Self, parent: *CoreSurface) void {
         self.setParentWithContext(parent, .tab);
     }
 
     pub fn setParentWithContext(self: *Self, parent: *CoreSurface, context: apprt.surface.NewSurfaceContext) void {
-        if (self.getActiveSurface()) |surface| {
-            surface.setParent(parent, context);
-        }
+        const tree = self.getSurfaceTree() orelse return;
+        var it = tree.iterator();
+        while (it.next()) |entry| entry.view.setParent(parent, context);
     }
 
     pub fn new(config: ?*Config, overrides: struct {
@@ -193,7 +192,7 @@ pub const Tab = extern struct {
         title: ?[:0]const u8 = null,
 
         pub const none: @This() = .{};
-    }) *Self {
+    }, layout_name: ?[]const u8) *Self {
         const tab = gobject.ext.newInstance(Tab, .{});
 
         const priv: *Private = tab.private();
@@ -208,6 +207,40 @@ pub const Tab = extern struct {
         }
 
         tab.as(gobject.Object).notifyByPspec(properties.config.impl.param_spec);
+
+        // Resolve the explicitly requested layout, falling back to the
+        // configured default and finally to a normal single terminal.
+        const resolved_layout = layout_name orelse if (priv.config) |cfg|
+            @field(cfg.get(), "window-layout-default")
+        else
+            null;
+
+        if (resolved_layout) |name| layout: {
+            var arena = std.heap.ArenaAllocator.init(Application.default().allocator());
+            defer arena.deinit();
+
+            const config_value = if (priv.config) |cfg| cfg.get() else break :layout;
+            const plan = config_value.@"window-layout".get(
+                name,
+                arena.allocator(),
+            ) catch |err| {
+                log.warn("unable to load window layout name={s} err={}", .{ name, err });
+                break :layout;
+            } orelse {
+                log.warn("unknown window layout name={s}", .{name});
+                break :layout;
+            };
+
+            priv.split_tree.newLayout(plan, .{
+                .command = overrides.command,
+                .working_directory = overrides.working_directory,
+                .title = overrides.title,
+            }) catch |err| {
+                log.warn("unable to create window layout name={s} err={}", .{ name, err });
+                break :layout;
+            };
+            return tab;
+        }
 
         // Create our initial surface in the split tree.
         priv.split_tree.newSplit(.right, null, .{

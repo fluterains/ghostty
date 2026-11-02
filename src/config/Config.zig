@@ -1099,6 +1099,14 @@ palette: Palette = .{},
 /// Available since: 1.3.0
 @"split-preserve-zoom": SplitPreserveZoom = .{},
 
+/// Whether spatial split focus navigation wraps at the edges of the split
+/// layout. When enabled, focusing left from the leftmost split moves focus to
+/// the rightmost split. When disabled, focus remains on the current split.
+///
+/// This applies to left/right/up/down `goto_split` navigation. It does not
+/// affect `previous` or `next` split navigation.
+@"split-focus-wrap": bool = true,
+
 /// The foreground and background color for search matches. This only applies
 /// to non-focused search matches, also known as candidate matches.
 ///

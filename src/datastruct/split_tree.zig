@@ -268,6 +268,19 @@ pub fn SplitTree(comptime V: type) type {
             to: Goto,
             recent: []const *const V,
         ) Allocator.Error!?Node.Handle {
+            return self.gotoWithHistoryWrap(alloc, from, to, recent, true);
+        }
+
+        /// Like gotoWithHistory, with explicit control over spatial edge
+        /// wrapping.
+        pub fn gotoWithHistoryWrap(
+            self: *const Self,
+            alloc: Allocator,
+            from: Node.Handle,
+            to: Goto,
+            recent: []const *const V,
+            wrap: bool,
+        ) Allocator.Error!?Node.Handle {
             return switch (to) {
                 .previous => self.previous(from),
                 .next => self.next(from),
@@ -277,7 +290,17 @@ pub fn SplitTree(comptime V: type) type {
                     // Get our spatial representation.
                     var sp = try self.spatial(alloc);
                     defer sp.deinit(alloc);
-                    break :spatial self.nearestWrapped(sp, from, d, recent);
+                    if (wrap) {
+                        break :spatial self.nearestWrapped(sp, from, d, recent);
+                    }
+
+                    break :spatial self.nearest(
+                        sp,
+                        from,
+                        d,
+                        sp.slots[from.idx()],
+                        recent,
+                    );
                 },
             };
         }
@@ -437,8 +460,10 @@ pub fn SplitTree(comptime V: type) type {
                 }) continue;
 
                 const candidate = Spatial.score(
+                    current,
                     target,
                     slot,
+                    direction,
                     recentRank(leaf, recent),
                 );
 
@@ -499,7 +524,7 @@ pub fn SplitTree(comptime V: type) type {
 
         fn recentRank(leaf: *const V, recent: []const *const V) ?usize {
             for (recent, 0..) |item, rank| {
-                if (item == leaf) return rank;
+                if (viewEql(item, leaf)) return rank;
             }
             return null;
         }
@@ -960,18 +985,28 @@ pub fn SplitTree(comptime V: type) type {
             pub const Direction = enum { left, right, down, up };
 
             const Score = struct {
+                well_aligned: bool,
                 recent_rank: ?usize,
                 distance: f16,
 
                 fn isBetter(self: Score, other: Score) bool {
-                    if (self.recent_rank) |self_rank| {
-                        if (other.recent_rank) |other_rank| {
-                            return self_rank < other_rank;
-                        }
-                        return true;
+                    // A history match must not allow a one-pixel sliver of
+                    // overlap to beat a meaningful neighbor.
+                    if (self.well_aligned != other.well_aligned) {
+                        return self.well_aligned;
                     }
 
-                    if (other.recent_rank != null) return false;
+                    if (self.well_aligned) {
+                        if (self.recent_rank) |self_rank| {
+                            if (other.recent_rank) |other_rank| {
+                                return self_rank < other_rank;
+                            }
+                            return true;
+                        }
+
+                        if (other.recent_rank != null) return false;
+                    }
+
                     return self.distance < other.distance;
                 }
             };
@@ -1005,14 +1040,38 @@ pub fn SplitTree(comptime V: type) type {
                 return a.y < b.maxY() and a.maxY() > b.y;
             }
 
+            fn overlapLength(a: Slot, b: Slot, direction: Direction) f16 {
+                return switch (direction) {
+                    .left, .right => @min(a.maxY(), b.maxY()) - @max(a.y, b.y),
+                    .up, .down => @min(a.maxX(), b.maxX()) - @max(a.x, b.x),
+                };
+            }
+
+            fn perpendicularExtent(slot: Slot, direction: Direction) f16 {
+                return switch (direction) {
+                    .left, .right => slot.height,
+                    .up, .down => slot.width,
+                };
+            }
+
             fn score(
+                current: Slot,
                 target: Slot,
                 candidate: Slot,
+                direction: Direction,
                 recent_rank: ?usize,
             ) Score {
+                const overlap = overlapLength(current, candidate, direction);
+                const min_extent = @min(
+                    perpendicularExtent(current, direction),
+                    perpendicularExtent(candidate, direction),
+                );
+                const well_aligned = min_extent > 0 and overlap / min_extent >= 0.5;
+
                 const dx = candidate.x - target.x;
                 const dy = candidate.y - target.y;
                 return .{
+                    .well_aligned = well_aligned,
                     .recent_rank = recent_rank,
                     .distance = @sqrt(dx * dx + dy * dy),
                 };
@@ -1385,6 +1444,11 @@ pub fn SplitTree(comptime V: type) type {
             }
         }
 
+        fn viewEql(a: *const View, b: *const View) bool {
+            if (comptime @hasDecl(View, "eql")) return a.eql(b);
+            return a == b;
+        }
+
         /// Make this a valid gobject if we're in a GTK environment.
         pub const getGObjectType = switch (build_config.app_runtime) {
             .gtk => @import("gobject").ext.defineBoxed(
@@ -1447,6 +1511,10 @@ const TestView = struct {
 
     pub fn unref(self: *Self, alloc: Allocator) void {
         alloc.destroy(self);
+    }
+
+    pub fn eql(a: *const Self, b: *const Self) bool {
+        return std.mem.eql(u8, a.label, b.label);
     }
 
     pub fn splitTreeLabel(self: *const Self) []const u8 {
@@ -1676,6 +1744,16 @@ test "SplitTree: split horizontal" {
             } else return error.NotFound,
         ) == null);
     }
+}
+
+test "SplitTree: view equality supports copied views" {
+    const testing = std.testing;
+    var a: TestView = .{ .label = "A" };
+    var b: TestView = .{ .label = "A" };
+    var c: TestView = .{ .label = "C" };
+
+    try testing.expect(TestTree.viewEql(&a, &b));
+    try testing.expect(!TestTree.viewEql(&a, &c));
 }
 
 test "SplitTree: split vertical" {
@@ -2116,6 +2194,25 @@ test "SplitTree: spatial goto" {
         try testing.expectEqualStrings("C", view.label);
     }
 
+    // Spatial A => left without wrapping
+    {
+        const target = try split.gotoWithHistoryWrap(
+            alloc,
+            from: {
+                var it = split.iterator();
+                break :from while (it.next()) |entry| {
+                    if (std.mem.eql(u8, entry.view.label, "A")) {
+                        break entry.handle;
+                    }
+                } else return error.NotFound;
+            },
+            .{ .spatial = .left },
+            &.{},
+            false,
+        );
+        try testing.expect(target == null);
+    }
+
     // Spatial A => left (wrapped)
     {
         const target = (try split.goto(
@@ -2187,6 +2284,37 @@ test "SplitTree: spatial goto" {
             \\
         );
     }
+}
+
+test "SplitTree: spatial score prefers aligned neighbors over sliver history" {
+    const testing = std.testing;
+    const Score = TestTree.Spatial.Score;
+
+    const aligned = Score{
+        .well_aligned = true,
+        .recent_rank = null,
+        .distance = 0.5,
+    };
+    const recent_sliver = Score{
+        .well_aligned = false,
+        .recent_rank = 0,
+        .distance = 0.01,
+    };
+    try testing.expect(aligned.isBetter(recent_sliver));
+    try testing.expect(!recent_sliver.isBetter(aligned));
+
+    const recent = Score{
+        .well_aligned = true,
+        .recent_rank = 0,
+        .distance = 0.9,
+    };
+    const older = Score{
+        .well_aligned = true,
+        .recent_rank = 3,
+        .distance = 0.1,
+    };
+    try testing.expect(recent.isBetter(older));
+    try testing.expect(!older.isBetter(recent));
 }
 
 test "SplitTree: resize" {

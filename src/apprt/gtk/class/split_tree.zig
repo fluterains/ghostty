@@ -244,6 +244,41 @@ pub const SplitTree = extern struct {
         }
     }
 
+    fn treeContainsSurface(tree: *const Surface.Tree, surface: *Surface) bool {
+        var it = tree.iterator();
+        while (it.next()) |entry| {
+            if (entry.view == surface) return true;
+        }
+        return false;
+    }
+
+    /// Drop focus references to surfaces that are no longer present after a
+    /// tree replacement. Without this, the bounded history can keep closed
+    /// terminals alive until enough new panes happen to evict them.
+    fn pruneFocusState(self: *Self) void {
+        const priv = self.private();
+        const tree: ?*const Surface.Tree = priv.tree;
+
+        var i: usize = 0;
+        while (i < priv.focus_history.items.len) {
+            const surface = priv.focus_history.items[i];
+            if (tree != null and treeContainsSurface(tree.?, surface)) {
+                i += 1;
+                continue;
+            }
+
+            _ = priv.focus_history.orderedRemove(i);
+            surface.unref();
+        }
+
+        if (priv.last_focused.get()) |surface| {
+            defer surface.unref();
+            if (tree == null or !treeContainsSurface(tree.?, surface)) {
+                priv.last_focused.set(null);
+            }
+        }
+    }
+
     fn recentFocus(self: *Self, buffer: *[Private.focus_history_max]*Surface) usize {
         const items = self.private().focus_history.items;
         var count: usize = 0;
@@ -307,13 +342,10 @@ pub const SplitTree = extern struct {
         var single_tree = try Surface.Tree.init(alloc, surface);
         defer single_tree.deinit();
 
-        // We want to move our focus to the new surface no matter what.
-        self.recordFocus(surface);
-        errdefer self.forgetFocus(surface);
-
         // If we have no tree yet, then this becomes our tree and we're done.
         const old_tree = self.getTree() orelse {
             self.setTree(&single_tree);
+            self.recordFocus(surface);
             return;
         };
 
@@ -335,7 +367,9 @@ pub const SplitTree = extern struct {
             .{ handle, direction, old_tree, &new_tree },
         );
 
-        // Replace our tree
+        // Replace our tree and record focus only after all fallible work has
+        // succeeded. This keeps the previous focus state intact on failure.
+        self.recordFocus(surface);
         self.setTree(&new_tree);
     }
 
@@ -389,14 +423,19 @@ pub const SplitTree = extern struct {
     pub fn goto(self: *Self, to: Surface.Tree.Goto) bool {
         const tree = self.getTree() orelse return false;
         const active = self.getActiveSurfaceHandle() orelse return false;
+        const app = Application.default();
+        const config_obj = app.getConfig();
+        defer config_obj.unref();
+        const config = config_obj.get();
         var recent_buffer: [Private.focus_history_max]*Surface = undefined;
         const recent_count = self.recentFocus(&recent_buffer);
         const recent: []const *const Surface = recent_buffer[0..recent_count];
-        const target = if (tree.gotoWithHistory(
+        const target = if (tree.gotoWithHistoryWrap(
             Application.default().allocator(),
             active,
             to,
             recent,
+            config.@"split-focus-wrap",
         )) |handle_|
             handle_ orelse return false
         else |err| switch (err) {
@@ -419,11 +458,6 @@ pub const SplitTree = extern struct {
         self.recordFocus(surface);
 
         if (tree.zoomed != null) {
-            const app = Application.default();
-            const config_obj = app.getConfig();
-            defer config_obj.unref();
-            const config = config_obj.get();
-
             if (!config.@"split-preserve-zoom".navigation) {
                 tree.zoomed = null;
             } else {
@@ -510,9 +544,31 @@ pub const SplitTree = extern struct {
     fn getActiveSurfaceHandle(self: *Self) ?Surface.Tree.Node.Handle {
         const tree = self.getTree() orelse return null;
         var it = tree.iterator();
+        var first_focused: ?Surface.Tree.Node.Handle = null;
+        var focused_count: usize = 0;
         while (it.next()) |entry| {
-            if (entry.view.getFocused()) return entry.handle;
+            if (!entry.view.getFocused()) continue;
+            if (first_focused == null) first_focused = entry.handle;
+            focused_count += 1;
         }
+
+        if (focused_count == 1) return first_focused;
+
+        // During a GTK rebuild focus events can transiently leave multiple
+        // surfaces marked focused. Prefer our explicit last-focused surface
+        // instead of whichever node happens to appear first in the tree.
+        if (self.private().last_focused.get()) |v| {
+            defer v.unref();
+
+            if (v.getFocused()) {
+                it = tree.iterator();
+                while (it.next()) |entry| {
+                    if (entry.view == v) return entry.handle;
+                }
+            }
+        }
+
+        if (focused_count > 0) return first_focused;
 
         // If none are currently focused, the most previously focused
         // surface (if it exists) is our active surface. This lets things
@@ -591,6 +647,8 @@ pub const SplitTree = extern struct {
             priv.tree = ext.boxedCopy(Surface.Tree, new_tree);
             self.connectSurfaceHandlers();
         }
+
+        self.pruneFocusState();
 
         self.as(gobject.Object).notifyByPspec(properties.tree.impl.param_spec);
     }

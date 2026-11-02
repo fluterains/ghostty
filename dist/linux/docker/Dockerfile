@@ -1,7 +1,6 @@
 FROM ubuntu:24.04 AS toolchain
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG GHOSTTY_VERSION=1.3.1-patched.2
 ARG ZIG_VERSION=0.15.2
 
 # BuildKit forwards these values into RUN steps. They are supplied by the
@@ -81,6 +80,8 @@ ENV PATH=/opt/blueprint/bin:${PATH}
 
 FROM toolchain AS builder
 
+ARG GHOSTTY_VERSION=1.3.1-patched.1
+
 WORKDIR /src
 COPY . /src
 
@@ -100,7 +101,7 @@ RUN --mount=type=cache,id=ghostty-zig-global-v3,target=/var/cache/zig \
 # origin-relative RUNPATH so the package never contains a build-machine path.
 RUN patchelf --set-rpath '$ORIGIN/../lib' /out/usr/bin/ghostty && \
     install -Dm644 LICENSE /out/usr/share/doc/ghostty/LICENSE && \
-    install -Dm644 PATCH2.md /out/usr/share/doc/ghostty/PATCH2.md
+    install -Dm644 PATCH1.md /out/usr/share/doc/ghostty/PATCH1.md
 
 COPY dist/linux/docker/control.in /tmp/control.in
 COPY dist/linux/docker/postinst /tmp/debian-postinst
@@ -115,6 +116,19 @@ RUN mkdir -p /out/DEBIAN && \
     mkdir -p /artifacts && \
     dpkg-deb --root-owner-group --build /out \
         "/artifacts/ghostty_${GHOSTTY_VERSION}_amd64.deb"
+
+FROM builder AS test
+
+ARG GHOSTTY_VERSION=1.3.1-patched.1
+
+RUN --mount=type=cache,id=ghostty-zig-global-v3,target=/var/cache/zig \
+    --mount=type=cache,id=ghostty-zig-local-v4,target=/src/.zig-cache \
+    unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy && \
+    zig fmt --check . && \
+    ZIG_GLOBAL_CACHE_DIR=/var/cache/zig \
+    zig build test \
+        -Dversion-string="${GHOSTTY_VERSION}" \
+        -fno-sys=gtk4-layer-shell
 
 FROM scratch AS package
 COPY --from=builder /artifacts/ /

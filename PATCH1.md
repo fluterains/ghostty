@@ -18,3 +18,8 @@ This patch contains the spatial split-navigation hardening developed for the
   terminal closes.
 
 The GTK runtime remains the supported implementation for this patch.
+
+## Linux desktop integration
+
+- Localize the desktop entry comment and new-window action into Simplified
+  Chinese (`zh_CN`).

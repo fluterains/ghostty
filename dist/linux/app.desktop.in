@@ -3,6 +3,7 @@ Version=1.0
 Name=@NAME@
 Type=Application
 Comment=A terminal emulator
+Comment[zh_CN]=终端模拟器
 TryExec=@GHOSTTY@
 Exec=@GHOSTTY@ --gtk-single-instance=true
 Icon=com.mitchellh.ghostty
@@ -23,4 +24,5 @@ X-KDE-Shortcuts=Ctrl+Alt+T
 
 [Desktop Action new-window]
 Name=New Window
+Name[zh_CN]=新建窗口
 Exec=@GHOSTTY@ --gtk-single-instance=true

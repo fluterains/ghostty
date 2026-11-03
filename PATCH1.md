@@ -23,3 +23,5 @@ The GTK runtime remains the supported implementation for this patch.
 
 - Localize the desktop entry comment and new-window action into Simplified
   Chinese (`zh_CN`).
+- Apply initial maximize and fullscreen state after the GTK window is mapped,
+  because X11 window managers may ignore requests made before presentation.

@@ -7,6 +7,7 @@ template $GhosttyWindow: Adw.ApplicationWindow {
   ]
 
   close-request => $close_request();
+  map => $map();
   realize => $realize();
   notify::config => $notify_config();
   notify::fullscreened => $notify_fullscreened();

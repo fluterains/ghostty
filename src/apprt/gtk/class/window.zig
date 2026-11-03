@@ -246,6 +246,11 @@ pub const Window = extern struct {
         /// For now, this logic is more similar to our legacy GTK side.
         surface_init: bool = false,
 
+        /// Whether the initial maximize/fullscreen state has been applied.
+        /// Window managers may ignore these requests before the window is
+        /// mapped, so apply them once from the first map signal.
+        initial_window_state_applied: bool = false,
+
         /// See tabOverviewOpen for why we have this.
         tab_overview_focus_timer: ?c_uint = null,
 
@@ -324,10 +329,6 @@ pub const Window = extern struct {
 
         // Initialize our actions
         self.initActionMap();
-
-        // Start states based on config.
-        if (config.maximize) self.as(gtk.Window).maximize();
-        if (config.fullscreen != .false) self.as(gtk.Window).fullscreen();
 
         // If we have an explicit title set, we set that immediately
         // so that any applications inspecting the window states see
@@ -1261,6 +1262,16 @@ pub const Window = extern struct {
     //---------------------------------------------------------------
     // Signal handlers
 
+    fn windowMap(_: *gtk.Widget, self: *Window) callconv(.c) void {
+        const priv = self.private();
+        if (priv.initial_window_state_applied) return;
+        priv.initial_window_state_applied = true;
+
+        const config = if (priv.config) |value| value.get() else return;
+        if (config.maximize) self.as(gtk.Window).maximize();
+        if (config.fullscreen != .false) self.as(gtk.Window).fullscreen();
+    }
+
     fn windowRealize(_: *gtk.Widget, self: *Window) callconv(.c) void {
         const app = Application.default();
 
@@ -2092,6 +2103,7 @@ pub const Window = extern struct {
             class.bindTemplateChildPrivate("toast_overlay", .{});
 
             // Template Callbacks
+            class.bindTemplateCallback("map", &windowMap);
             class.bindTemplateCallback("realize", &windowRealize);
             class.bindTemplateCallback("new_tab", &btnNewTab);
             class.bindTemplateCallback("overview_create_tab", &tabOverviewCreateTab);

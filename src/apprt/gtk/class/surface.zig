@@ -168,6 +168,24 @@ pub const Surface = extern struct {
             );
         };
 
+        pub const mapped = struct {
+            pub const name = "mapped";
+            const impl = gobject.ext.defineProperty(
+                name,
+                Self,
+                bool,
+                .{
+                    .default = false,
+                    .accessor = gobject.ext.privateFieldAccessor(
+                        Self,
+                        Private,
+                        &Private.offset,
+                        "mapped",
+                    ),
+                },
+            );
+        };
+
         pub const @"min-size" = struct {
             pub const name = "min-size";
             const impl = gobject.ext.defineProperty(
@@ -590,6 +608,10 @@ pub const Surface = extern struct {
         /// The current focus state of the terminal based on the
         /// focus events.
         focused: bool = true,
+
+        /// Whether the GLArea widget is mapped. Some operations like grabbing
+        /// focus only work if a widget is mapped.
+        mapped: bool = false,
 
         /// Whether this surface is "zoomed" or not. A zoomed surface
         /// shows up taking the full bounds of a split view.
@@ -1767,6 +1789,7 @@ pub const Surface = extern struct {
         priv.mouse_shape = .text;
         priv.mouse_hidden = false;
         priv.focused = true;
+        priv.mapped = false;
         priv.size = .{ .width = 0, .height = 0 };
         priv.vadj_signal_group = null;
 
@@ -2016,6 +2039,11 @@ pub const Surface = extern struct {
     /// Returns the focus state of this surface.
     pub fn getFocused(self: *Self) bool {
         return self.private().focused;
+    }
+
+    /// Returns true if the GLArea of this surface is mapped.
+    pub fn getMapped(self: *Self) bool {
+        return self.private().mapped;
     }
 
     /// Set the initial focus state before the surface is realized. This is for
@@ -3283,6 +3311,26 @@ pub const Surface = extern struct {
         priv.im_context.as(gtk.IMContext).setClientWidget(null);
     }
 
+    fn glareaMap(
+        _: *gtk.GLArea,
+        self: *Self,
+    ) callconv(.c) void {
+        self.updateMapped(true);
+    }
+
+    fn glareaUnmap(
+        _: *gtk.GLArea,
+        self: *Self,
+    ) callconv(.c) void {
+        self.updateMapped(false);
+    }
+
+    fn updateMapped(self: *Self, mapped: bool) void {
+        const priv = self.private();
+        priv.mapped = mapped;
+        self.as(gobject.Object).notifyByPspec(properties.mapped.impl.param_spec);
+    }
+
     fn glareaRender(
         _: *gtk.GLArea,
         _: *gdk.GLContext,
@@ -3625,6 +3673,8 @@ pub const Surface = extern struct {
             class.bindTemplateCallback("drop", &dtDrop);
             class.bindTemplateCallback("gl_realize", &glareaRealize);
             class.bindTemplateCallback("gl_unrealize", &glareaUnrealize);
+            class.bindTemplateCallback("gl_map", &glareaMap);
+            class.bindTemplateCallback("gl_unmap", &glareaUnmap);
             class.bindTemplateCallback("gl_render", &glareaRender);
             class.bindTemplateCallback("gl_resize", &glareaResize);
             class.bindTemplateCallback("im_preedit_start", &imPreeditStart);
@@ -3657,6 +3707,7 @@ pub const Surface = extern struct {
                 properties.@"error".impl,
                 properties.@"font-size-request".impl,
                 properties.focused.impl,
+                properties.mapped.impl,
                 properties.@"key-sequence".impl,
                 properties.@"key-table".impl,
                 properties.@"min-size".impl,

@@ -165,6 +165,13 @@ pub const SplitTree = extern struct {
         /// used to debounce updates.
         rebuild_source: ?c_uint = null,
 
+        /// The source that we use to restore focus. With enough nested
+        /// splits, some surfaces might initially be allocated a width or
+        /// height of 0 which causes them to get unmapped and lose focus.
+        /// We can reliably restore focus to the last focused surface only
+        /// once it is mapped again.
+        restore_focus_source: ?c_uint = null,
+
         /// Used to store state about a pending surface close for the
         /// close dialog.
         pending_close: ?Surface.Tree.Node.Handle,
@@ -657,6 +664,13 @@ pub const SplitTree = extern struct {
                 self,
                 .{ .detail = "focused" },
             );
+            _ = gobject.Object.signals.notify.connect(
+                surface,
+                *Self,
+                propSurfaceMapped,
+                self,
+                .{ .detail = "mapped" },
+            );
         }
     }
 
@@ -838,6 +852,12 @@ pub const SplitTree = extern struct {
                 log.warn("unable to remove rebuild source", .{});
             }
             priv.rebuild_source = null;
+        }
+        if (priv.restore_focus_source) |v| {
+            if (glib.Source.remove(v) == 0) {
+                log.warn("unable to remove restore focus source", .{});
+            }
+            priv.restore_focus_source = null;
         }
 
         gtk.Widget.disposeTemplate(
@@ -1035,6 +1055,23 @@ pub const SplitTree = extern struct {
         self.as(gobject.Object).notifyByPspec(properties.@"active-surface".impl.param_spec);
     }
 
+    fn propSurfaceMapped(
+        surface: *Surface,
+        _: *gobject.ParamSpec,
+        self: *Self,
+    ) callconv(.c) void {
+        if (!surface.getMapped()) return;
+
+        // We could add the idle callback only if this is actually the last
+        // focused surface, but all surfaces usually get mapped at once, so
+        // the idle callback runs only once anyway.
+        const priv = self.private();
+        if (priv.restore_focus_source == null) priv.restore_focus_source = glib.idleAdd(
+            onRestoreFocus,
+            self,
+        );
+    }
+
     fn propTree(
         self: *Self,
         _: *gobject.ParamSpec,
@@ -1048,13 +1085,19 @@ pub const SplitTree = extern struct {
         self.as(gobject.Object).notifyByPspec(properties.@"has-surfaces".impl.param_spec);
         self.as(gobject.Object).notifyByPspec(properties.@"is-zoomed".impl.param_spec);
 
-        // If we were planning a rebuild, always remove that so we can
-        // start from a clean slate.
+        // If we were planning a rebuild or focus restore, always remove
+        // that so we can start from a clean slate.
         if (priv.rebuild_source) |v| {
             if (glib.Source.remove(v) == 0) {
                 log.warn("unable to remove rebuild source", .{});
             }
             priv.rebuild_source = null;
+        }
+        if (priv.restore_focus_source) |v| {
+            if (glib.Source.remove(v) == 0) {
+                log.warn("unable to remove restore focus source", .{});
+            }
+            priv.restore_focus_source = null;
         }
 
         // If we transitioned to an empty tree, clear immediately instead of
@@ -1107,6 +1150,25 @@ pub const SplitTree = extern struct {
 
         // Our active surface may have changed
         self.as(gobject.Object).notifyByPspec(properties.@"active-surface".impl.param_spec);
+
+        return 0;
+    }
+
+    fn onRestoreFocus(ud: ?*anyopaque) callconv(.c) c_int {
+        const self: *Self = @ptrCast(@alignCast(ud orelse return 0));
+
+        const priv = self.private();
+        priv.restore_focus_source = null;
+
+        // A surface can lose focus when the tree is rebuilt because GTK may
+        // temporarily unmap it while reparenting widgets. Only grab focus once
+        // the last focused surface is mapped again.
+        if (priv.last_focused.get()) |v| {
+            defer v.unref();
+            if (v.getMapped()) {
+                v.grabFocus();
+            }
+        }
 
         return 0;
     }

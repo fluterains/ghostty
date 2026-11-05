@@ -165,6 +165,11 @@ pub const SplitTree = extern struct {
         /// used to debounce updates.
         rebuild_source: ?c_uint = null,
 
+        /// True while installing a tree that was already applied to the
+        /// existing widget hierarchy. The tree property must still notify
+        /// bindings, but propTree must not schedule another rebuild.
+        skip_rebuild: bool = false,
+
         /// The source that we use to restore focus. With enough nested
         /// splits, some surfaces might initially be allocated a width or
         /// height of 0 which causes them to get unmapped and lose focus.
@@ -360,6 +365,7 @@ pub const SplitTree = extern struct {
         // The handle we create the split relative to. Today this is the active
         // surface but this might be the handle of the given parent if we want.
         const handle = self.getActiveSurfaceHandle() orelse .root;
+        const active_surface = old_tree.nodes[handle.idx()].leaf;
 
         // Create our split!
         var new_tree = try old_tree.split(
@@ -378,6 +384,30 @@ pub const SplitTree = extern struct {
         // Replace our tree and record focus only after all fallible work has
         // succeeded. This keeps the previous focus state intact on failure.
         self.recordFocus(surface);
+
+        // Insert the new split directly into the existing GTK hierarchy when
+        // possible. This only detaches and reparents the target surface and
+        // leaves every other split untouched.
+        if (ext.getAncestor(
+            SurfaceScrolledWindow,
+            active_surface.as(gtk.Widget),
+        )) |old_window| {
+            if (replaceLeafWithSplit(
+                &new_tree,
+                handle,
+                direction,
+                old_window,
+                surface,
+            )) {
+                self.setTreeIncremental(&new_tree);
+                self.applyZoom();
+                surface.grabFocus();
+                return;
+            }
+        }
+
+        // Fall back to the debounced full rebuild if the existing widget
+        // cannot be found or replaced safely.
         self.setTree(&new_tree);
     }
 
@@ -567,7 +597,18 @@ pub const SplitTree = extern struct {
             @floatCast(ratio),
         );
         defer new_tree.deinit();
-        self.setTree(&new_tree);
+
+        const changed = changedSplit(old_tree, &new_tree) orelse return false;
+        const changed_ratio = new_tree.nodes[changed.idx()].split.ratio;
+        old_tree.resizeInPlace(changed, changed_ratio);
+
+        if (self.findSplitWidget(changed)) |widget| {
+            widget.restorePosition();
+        } else {
+            // The model was updated in place, so restore it from the clone if
+            // the corresponding widget cannot be found.
+            self.setTree(&new_tree);
+        }
         return true;
     }
 
@@ -617,12 +658,11 @@ pub const SplitTree = extern struct {
                 tree.zoom(target);
             }
 
-            // When the zoom state changes our tree state changes and
-            // we need to send the proper notifications to trigger
-            // relayout.
-            const object = self.as(gobject.Object);
-            object.notifyByPspec(properties.tree.impl.param_spec);
-            object.notifyByPspec(properties.@"is-zoomed".impl.param_spec);
+            // Keep the full widget tree attached and only switch which
+            // branches are visible. Rebuilding the tree here detaches and
+            // reattaches every surface, which causes visible flashing.
+            self.applyZoom();
+            self.as(gobject.Object).notifyByPspec(properties.@"is-zoomed".impl.param_spec);
         }
 
         return true;
@@ -775,6 +815,17 @@ pub const SplitTree = extern struct {
     /// Set the tree data model that we're showing in this widget. This
     /// will clone the given tree.
     pub fn setTree(self: *Self, tree_: ?*const Surface.Tree) void {
+        self.setTreeImpl(tree_, true);
+    }
+
+    /// Install a tree whose widget hierarchy has already been updated in
+    /// place. This still emits the tree notification for bindings and handlers,
+    /// but intentionally skips the deferred full rebuild.
+    fn setTreeIncremental(self: *Self, tree_: ?*const Surface.Tree) void {
+        self.setTreeImpl(tree_, false);
+    }
+
+    fn setTreeImpl(self: *Self, tree_: ?*const Surface.Tree, rebuild: bool) void {
         const priv = self.private();
 
         // We always normalize our tree parameter so that empty trees
@@ -810,7 +861,16 @@ pub const SplitTree = extern struct {
 
         self.pruneFocusState();
 
-        self.as(gobject.Object).notifyByPspec(properties.tree.impl.param_spec);
+        const object = self.as(gobject.Object);
+        if (rebuild) {
+            object.notifyByPspec(properties.tree.impl.param_spec);
+        } else {
+            priv.skip_rebuild = true;
+            defer priv.skip_rebuild = false;
+            object.notifyByPspec(properties.tree.impl.param_spec);
+            object.notifyByPspec(properties.@"is-split".impl.param_spec);
+            object.notifyByPspec(properties.@"active-surface".impl.param_spec);
+        }
     }
 
     fn getTreeValue(self: *Self, value: *gobject.Value) void {
@@ -931,7 +991,30 @@ pub const SplitTree = extern struct {
             return;
         };
         defer new_tree.deinit();
-        self.setTree(&new_tree);
+
+        const tree = self.getTree() orelse return;
+        var all_found = true;
+        for (old_tree.nodes, new_tree.nodes, 0..) |old_node, new_node, handle| {
+            switch (old_node) {
+                .leaf => {},
+                .split => |old_split| {
+                    const new_split = new_node.split;
+                    if (old_split.ratio == new_split.ratio) continue;
+                    tree.resizeInPlace(
+                        @enumFromInt(handle),
+                        new_split.ratio,
+                    );
+                    if (self.findSplitWidget(@enumFromInt(handle))) |widget| {
+                        widget.restorePosition();
+                    } else {
+                        all_found = false;
+                        break;
+                    }
+                },
+            }
+        }
+
+        if (!all_found) self.setTree(&new_tree);
     }
 
     pub fn actionZoom(
@@ -948,7 +1031,10 @@ pub const SplitTree = extern struct {
             tree.zoom(active);
         }
 
-        self.as(gobject.Object).notifyByPspec(properties.tree.impl.param_spec);
+        // The full split tree remains attached. Zoom only changes which
+        // branches are visible, so avoid a full widget-tree rebuild.
+        self.applyZoom();
+        self.as(gobject.Object).notifyByPspec(properties.@"is-zoomed".impl.param_spec);
     }
 
     fn surfaceCloseRequest(
@@ -1005,24 +1091,13 @@ pub const SplitTree = extern struct {
         const handle = priv.pending_close orelse return;
         priv.pending_close = null;
 
-        // Figure out our next focus target. The next focus target is
-        // always the "previous" surface unless we're the leftmost then
-        // its the next.
+        // Focus the sibling subtree that replaces the closed split. If the
+        // sibling is itself a subtree, choose the leaf nearest the shared
+        // boundary: leftmost for a closed left child and rightmost for a
+        // closed right child.
         const old_tree = self.getTree() orelse return;
         self.forgetFocus(old_tree.nodes[handle.idx()].leaf);
-        const next_focus: ?*Surface = next_focus: {
-            const alloc = Application.default().allocator();
-            const next_handle: Surface.Tree.Node.Handle =
-                (old_tree.goto(alloc, handle, .previous) catch null) orelse
-                (old_tree.goto(alloc, handle, .next) catch null) orelse
-                break :next_focus null;
-            if (next_handle == handle) break :next_focus null;
-
-            // Note: we don't need to ref this or anything because its
-            // guaranteed to remain in the new tree since its not part
-            // of the handle we're removing.
-            break :next_focus old_tree.nodes[next_handle.idx()].leaf;
-        };
+        const next_focus = siblingFocusTarget(old_tree, handle);
 
         // Remove it from the tree.
         var new_tree = old_tree.remove(
@@ -1033,6 +1108,22 @@ pub const SplitTree = extern struct {
             return;
         };
         defer new_tree.deinit();
+
+        // Remove the leaf from the existing widget hierarchy when possible.
+        // The sibling subtree takes the old split's place, so unrelated
+        // branches never need to be detached or reparented.
+        if (!new_tree.isEmpty() and self.removeLeafFromSplit(old_tree, handle)) {
+            self.setTreeIncremental(&new_tree);
+            self.applyZoom();
+            if (next_focus) |v| {
+                self.recordFocus(v);
+                v.grabFocus();
+            }
+            return;
+        }
+
+        // Fall back to the full rebuild for the final pane or if the widget
+        // hierarchy cannot be updated incrementally.
         self.setTree(&new_tree);
 
         // Grab focus. We have to set this on the "last focused" because our
@@ -1072,6 +1163,180 @@ pub const SplitTree = extern struct {
         );
     }
 
+    fn nodeContains(
+        tree: *const Surface.Tree,
+        ancestor: Surface.Tree.Node.Handle,
+        target: Surface.Tree.Node.Handle,
+    ) bool {
+        if (ancestor == target) return true;
+        return switch (tree.nodes[ancestor.idx()]) {
+            .leaf => false,
+            .split => |split| nodeContains(tree, split.left, target) or
+                nodeContains(tree, split.right, target),
+        };
+    }
+
+    fn findParentSplit(
+        tree: *const Surface.Tree,
+        target: Surface.Tree.Node.Handle,
+        current: Surface.Tree.Node.Handle,
+    ) ?Surface.Tree.Node.Handle {
+        return switch (tree.nodes[current.idx()]) {
+            .leaf => null,
+            .split => |split| {
+                if (split.left == target or split.right == target) return current;
+                if (nodeContains(tree, split.left, target)) {
+                    return findParentSplit(tree, target, split.left);
+                }
+                if (nodeContains(tree, split.right, target)) {
+                    return findParentSplit(tree, target, split.right);
+                }
+                return null;
+            },
+        };
+    }
+
+    fn siblingFocusTarget(
+        tree: *const Surface.Tree,
+        handle: Surface.Tree.Node.Handle,
+    ) ?*Surface {
+        const parent_handle = findParentSplit(tree, handle, .root) orelse return null;
+        const parent_split = &tree.nodes[parent_handle.idx()].split;
+        const target_is_left = parent_split.left == handle;
+        const sibling_handle = if (target_is_left)
+            parent_split.right
+        else
+            parent_split.left;
+
+        const target_handle = switch (tree.nodes[sibling_handle.idx()]) {
+            .leaf => sibling_handle,
+            .split => if (target_is_left)
+                tree.deepest(.left, sibling_handle)
+            else
+                tree.deepest(.right, sibling_handle),
+        };
+        return tree.nodes[target_handle.idx()].leaf;
+    }
+
+    fn changedSplit(
+        old_tree: *const Surface.Tree,
+        new_tree: *const Surface.Tree,
+    ) ?Surface.Tree.Node.Handle {
+        for (old_tree.nodes, new_tree.nodes, 0..) |old_node, new_node, handle| {
+            switch (old_node) {
+                .leaf => {},
+                .split => |old_split| {
+                    switch (new_node) {
+                        .leaf => return null,
+                        .split => |new_split| {
+                            if (old_split.ratio != new_split.ratio) {
+                                return @enumFromInt(handle);
+                            }
+                        },
+                    }
+                },
+            }
+        }
+        return null;
+    }
+
+    fn findSplitWidgetIn(
+        tree: *const Surface.Tree,
+        target: Surface.Tree.Node.Handle,
+        current: Surface.Tree.Node.Handle,
+        widget: *gtk.Widget,
+    ) ?*SplitTreeSplit {
+        if (current == target) {
+            return gobject.ext.cast(SplitTreeSplit, widget);
+        }
+
+        const split = switch (tree.nodes[current.idx()]) {
+            .leaf => return null,
+            .split => |split| split,
+        };
+        const split_widget = gobject.ext.cast(SplitTreeSplit, widget) orelse return null;
+        const start = split_widget.getStartChild() orelse return null;
+        const end = split_widget.getEndChild() orelse return null;
+        if (nodeContains(tree, split.left, target)) {
+            return findSplitWidgetIn(tree, target, split.left, start);
+        }
+        if (nodeContains(tree, split.right, target)) {
+            return findSplitWidgetIn(tree, target, split.right, end);
+        }
+        return null;
+    }
+
+    fn findSplitWidget(
+        self: *Self,
+        target: Surface.Tree.Node.Handle,
+    ) ?*SplitTreeSplit {
+        const tree = self.getTree() orelse return null;
+        const root = self.private().tree_bin.getChild() orelse return null;
+        return findSplitWidgetIn(tree, target, .root, root);
+    }
+
+    fn applyZoomNode(
+        self: *Self,
+        tree: *const Surface.Tree,
+        handle: Surface.Tree.Node.Handle,
+        widget: *gtk.Widget,
+        zoomed: ?Surface.Tree.Node.Handle,
+    ) void {
+        switch (tree.nodes[handle.idx()]) {
+            .leaf => {},
+            .split => |split| {
+                const split_widget = gobject.ext.cast(SplitTreeSplit, widget) orelse {
+                    log.warn("split widget not found while applying zoom", .{});
+                    return;
+                };
+                // Structural updates such as removing a leaf can renumber
+                // handles in the immutable model. Keep the surviving widget
+                // mapped to its current handle without rebuilding it.
+                split_widget.setHandle(handle);
+                const start = split_widget.getStartChild() orelse return;
+                const end = split_widget.getEndChild() orelse return;
+                const start_visible = if (zoomed) |target|
+                    nodeContains(tree, split.left, target)
+                else
+                    true;
+                const end_visible = if (zoomed) |target|
+                    nodeContains(tree, split.right, target)
+                else
+                    true;
+
+                start.setVisible(@intFromBool(start_visible));
+                end.setVisible(@intFromBool(end_visible));
+                self.applyZoomNode(tree, split.left, start, zoomed);
+                self.applyZoomNode(tree, split.right, end, zoomed);
+
+                // Hiding a paned child changes its allocated position. Restore
+                // all split positions once the full tree is visible again.
+                if (zoomed == null) split_widget.restorePosition();
+            },
+        }
+    }
+
+    /// Apply the model's zoom state to the already-built widget tree. The
+    /// active branch remains attached and visible while its sibling branches
+    /// are hidden, avoiding the detach/attach cycle of a full rebuild.
+    fn applyZoom(self: *Self) void {
+        const tree = self.getTree() orelse return;
+        const root = self.private().tree_bin.getChild() orelse return;
+
+        var zoomed = tree.zoomed;
+        if (zoomed) |target| {
+            if (!nodeContains(tree, .root, target)) {
+                tree.zoomed = null;
+                zoomed = null;
+            }
+        }
+
+        // The root is never hidden by zoom, but an incremental topology update
+        // can promote a previously hidden sibling to root. Ensure it is shown.
+        root.setVisible(1);
+        self.applyZoomNode(tree, .root, root, zoomed);
+    }
+
     fn propTree(
         self: *Self,
         _: *gobject.ParamSpec,
@@ -1084,6 +1349,10 @@ pub const SplitTree = extern struct {
         defer self.as(gobject.Object).thawNotify();
         self.as(gobject.Object).notifyByPspec(properties.@"has-surfaces".impl.param_spec);
         self.as(gobject.Object).notifyByPspec(properties.@"is-zoomed".impl.param_spec);
+
+        // The widget hierarchy was updated in place by the caller. Only the
+        // observable model properties need to be refreshed.
+        if (priv.skip_rebuild) return;
 
         // If we were planning a rebuild or focus restore, always remove
         // that so we can start from a clean slate.
@@ -1130,12 +1399,13 @@ pub const SplitTree = extern struct {
         if (tree.isEmpty()) {
             priv.tree_bin.setChild(null);
         } else {
-            const built = self.buildTree(
-                tree,
-                tree.zoomed orelse .root,
-            );
+            // Always build the complete hierarchy. Zoom is applied by hiding
+            // sibling branches, so exiting zoom never requires rebuilding and
+            // reparenting every surface.
+            const built = self.buildTree(tree, .root);
             defer built.deinit();
             priv.tree_bin.setChild(built.widget);
+            self.applyZoom();
         }
 
         // Replacing our tree widget hierarchy can reset focus state.
@@ -1171,6 +1441,127 @@ pub const SplitTree = extern struct {
         }
 
         return 0;
+    }
+
+    const ParentSlot = union(enum) {
+        bin: *adw.Bin,
+        paned_start: *gtk.Paned,
+        paned_end: *gtk.Paned,
+    };
+
+    fn parentSlotOf(widget: *gtk.Widget) ?ParentSlot {
+        const parent = widget.getParent() orelse return null;
+
+        if (gobject.ext.cast(gtk.Paned, parent)) |paned| {
+            if (paned.getStartChild()) |child| {
+                if (child == widget) {
+                    return .{ .paned_start = paned };
+                }
+            }
+
+            if (paned.getEndChild()) |child| {
+                if (child == widget) {
+                    return .{ .paned_end = paned };
+                }
+            }
+        }
+
+        if (gobject.ext.cast(adw.Bin, parent)) |bin| {
+            if (bin.getChild()) |child| {
+                if (child == widget) {
+                    return .{ .bin = bin };
+                }
+            }
+        }
+
+        return null;
+    }
+
+    fn clearParentSlot(slot: ParentSlot) void {
+        switch (slot) {
+            .bin => |bin| bin.setChild(null),
+            .paned_start => |paned| paned.setStartChild(null),
+            .paned_end => |paned| paned.setEndChild(null),
+        }
+    }
+
+    fn detachForReplace(widget: *gtk.Widget) ?ParentSlot {
+        const slot = parentSlotOf(widget) orelse return null;
+        clearParentSlot(slot);
+        return slot;
+    }
+
+    fn attachReplacement(slot: ParentSlot, widget: *gtk.Widget) void {
+        switch (slot) {
+            .bin => |bin| bin.setChild(widget),
+            .paned_start => |paned| paned.setStartChild(widget),
+            .paned_end => |paned| paned.setEndChild(widget),
+        }
+    }
+
+    fn replaceLeafWithSplit(
+        tree: *const Surface.Tree,
+        handle: Surface.Tree.Node.Handle,
+        direction: Surface.Tree.Split.Direction,
+        old_window: *SurfaceScrolledWindow,
+        surface: *Surface,
+    ) bool {
+        const old_widget = old_window.as(gtk.Widget);
+        _ = old_widget.as(gobject.Object).ref();
+        defer old_widget.as(gobject.Object).unref();
+
+        const slot = detachForReplace(old_widget) orelse {
+            log.warn("unable to detach surface for incremental split", .{});
+            return false;
+        };
+
+        const new_window = gobject.ext.newInstance(
+            SurfaceScrolledWindow,
+            .{ .surface = surface },
+        );
+        const new_widget = new_window.as(gtk.Widget);
+        switch (tree.nodes[handle.idx()]) {
+            .split => {},
+            .leaf => {
+                attachReplacement(slot, old_widget);
+                return false;
+            },
+        }
+        const split: *const Surface.Tree.Split = &tree.nodes[handle.idx()].split;
+
+        const replacement = switch (direction) {
+            .left, .up => SplitTreeSplit.new(handle, split, new_widget, old_widget),
+            .right, .down => SplitTreeSplit.new(handle, split, old_widget, new_widget),
+        };
+        attachReplacement(slot, replacement.as(gtk.Widget));
+        return true;
+    }
+
+    fn removeLeafFromSplit(
+        self: *Self,
+        tree: *const Surface.Tree,
+        handle: Surface.Tree.Node.Handle,
+    ) bool {
+        const parent_handle = findParentSplit(tree, handle, .root) orelse return false;
+        const parent_split = &tree.nodes[parent_handle.idx()].split;
+        const parent_widget = self.findSplitWidget(parent_handle) orelse return false;
+        const start = parent_widget.getStartChild() orelse return false;
+        const end = parent_widget.getEndChild() orelse return false;
+
+        const target_is_start = parent_split.left == handle;
+        const sibling = if (target_is_start) end else start;
+        _ = sibling.as(gobject.Object).ref();
+        defer sibling.as(gobject.Object).unref();
+
+        const slot = parentSlotOf(parent_widget.as(gtk.Widget)) orelse return false;
+
+        // Remove the sibling from the old split before detaching the split
+        // widget from its grandparent, so the sibling can take its place.
+        parent_widget.removeChild(sibling);
+
+        clearParentSlot(slot);
+        attachReplacement(slot, sibling);
+        return true;
     }
 
     /// Builds the widget tree associated with a surface split tree.
@@ -1375,6 +1766,11 @@ const SplitTreeSplit = extern struct {
         /// Source to handle repositioning the split when properties change.
         idle: ?c_uint = null,
 
+        /// Force the next idle update to apply the tree ratio rather than
+        /// treating the current paned position as a user resize. This is used
+        /// after showing panes that were hidden by split zoom.
+        force_position: bool = false,
+
         // Template bindings
         paned: *gtk.Paned,
 
@@ -1410,6 +1806,37 @@ const SplitTreeSplit = extern struct {
         return self;
     }
 
+    fn getStartChild(self: *Self) ?*gtk.Widget {
+        return self.private().paned.getStartChild();
+    }
+
+    fn setHandle(self: *Self, handle: Surface.Tree.Node.Handle) void {
+        self.private().handle = handle;
+    }
+
+    fn getEndChild(self: *Self) ?*gtk.Widget {
+        return self.private().paned.getEndChild();
+    }
+
+    fn removeChild(self: *Self, child: *gtk.Widget) void {
+        const paned = self.private().paned;
+        if (paned.getStartChild()) |start| {
+            if (start == child) {
+                paned.setStartChild(null);
+                return;
+            }
+        }
+        if (paned.getEndChild()) |end| {
+            if (end == child) paned.setEndChild(null);
+        }
+    }
+
+    fn restorePosition(self: *Self) void {
+        const priv = self.private();
+        priv.force_position = true;
+        self.refresh();
+    }
+
     fn init(self: *Self, _: *Class) callconv(.c) void {
         gtk.Widget.initTemplate(self.as(gtk.Widget));
     }
@@ -1439,6 +1866,12 @@ const SplitTreeSplit = extern struct {
             self.as(gtk.Widget),
         ) orelse return 0;
         const tree = split_tree.getTree() orelse return 0;
+
+        // Hiding a sibling while zoomed changes the paned position and max
+        // position. Those changes are not user resizes and must not mutate the
+        // split's stored ratio.
+        if (tree.zoomed != null) return 0;
+
         const split: *const Surface.Tree.Split = &tree.nodes[priv.handle.idx()].split;
 
         // Current, min, and max positions as pixels.
@@ -1483,14 +1916,26 @@ const SplitTreeSplit = extern struct {
         // split completely minimized.
         if (max == 0) return 0;
 
+        const desired_ratio: f64 = @floatCast(split.ratio);
+
+        // After leaving zoom, restore the position from the tree ratio. The
+        // paned position while its sibling was hidden is not meaningful.
+        if (priv.force_position) {
+            priv.force_position = false;
+            const desired_pos: c_int = desired_pos: {
+                const max_f64: f64 = @floatFromInt(max);
+                break :desired_pos @intFromFloat(@round(max_f64 * desired_ratio));
+            };
+            paned.setPosition(desired_pos);
+            return 0;
+        }
+
         // Determine our current ratio.
         const current_ratio: f64 = ratio: {
             const pos_f64: f64 = @floatFromInt(pos);
             const max_f64: f64 = @floatFromInt(max);
             break :ratio pos_f64 / max_f64;
         };
-        const desired_ratio: f64 = @floatCast(split.ratio);
-
         // If our ratio is close enough to our desired ratio, then
         // we ignore the update. This is to avoid constant split updates
         // for lossy floating point math.

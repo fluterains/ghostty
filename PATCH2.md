@@ -30,3 +30,25 @@ See `example/layouts/` for direct launch examples, a reusable named layout, and
 a 10-pane layout.
 
 Configured layout creation is currently implemented by the GTK runtime.
+
+## Split rendering fixes
+
+- Keep the complete GTK split hierarchy attached while toggling split zoom;
+  zoom now hides and restores sibling branches instead of rebuilding the tree.
+- Insert new splits directly into the existing hierarchy instead of detaching
+  and reparenting every surface.
+- Remove closed splits in place by promoting the surviving sibling subtree.
+- Update split ratios for resize and equalize operations in place, without a
+  full GTK widget-tree rebuild.
+- Preserve split ratios when panes are hidden by zoom and restore focus after
+  surfaces are mapped again.
+- Retain the deferred full rebuild as a fallback when an incremental widget
+  update cannot be completed safely.
+
+## Split focus behavior
+
+- Prefer the surviving sibling subtree when closing a split.
+- When the sibling is a subtree, focus its leftmost leaf if the closed child was
+  on the left, or its rightmost leaf if the closed child was on the right.
+- This keeps focus continuous with the region that expands to replace the
+  closed split while preserving deterministic behavior.

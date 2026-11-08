@@ -461,6 +461,7 @@ pub const DerivedConfig = struct {
     @"font-family-bold": configpkg.RepeatableString,
     @"font-family-italic": configpkg.RepeatableString,
     @"font-family-bold-italic": configpkg.RepeatableString,
+    @"font-family-prefer-monospace": bool,
     @"font-style": configpkg.FontStyle,
     @"font-style-bold": configpkg.FontStyle,
     @"font-style-italic": configpkg.FontStyle,
@@ -501,6 +502,7 @@ pub const DerivedConfig = struct {
             .@"font-family-bold" = try config.@"font-family-bold".clone(alloc),
             .@"font-family-italic" = try config.@"font-family-italic".clone(alloc),
             .@"font-family-bold-italic" = try config.@"font-family-bold-italic".clone(alloc),
+            .@"font-family-prefer-monospace" = config.@"font-family-prefer-monospace",
             .@"font-style" = try config.@"font-style".clone(alloc),
             .@"font-style-bold" = try config.@"font-style-bold".clone(alloc),
             .@"font-style-italic" = try config.@"font-style-italic".clone(alloc),
@@ -647,6 +649,12 @@ pub const Key = struct {
             });
         }
 
+        // Apply the Fontconfig preference to every configured style. Keeping
+        // it in the descriptors also makes font-grid caching honor reloads.
+        for (descriptors.items) |*desc| {
+            desc.fontconfig_monospace = config.@"font-family-prefer-monospace";
+        }
+
         // Setup the codepoint map
         const codepoint_map: CodepointMap = map: {
             const map = config.@"font-codepoint-map";
@@ -762,6 +770,34 @@ test "Key" {
 
     try testing.expect(k.hashcode() > 0);
     try testing.expectEqual(k.hashcode(), k2.hashcode());
+}
+
+test "fontconfig preference config and cache key" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var cfg = try Config.default(alloc);
+    defer cfg.deinit();
+    try testing.expect(cfg.@"font-family-prefer-monospace");
+
+    inline for (.{ "font-family", "font-family-bold", "font-family-italic", "font-family-bold-italic" }) |field| {
+        try @field(cfg, field).parseCLI(cfg._arena.?.allocator(), "Maple Mono Normal NF CN");
+    }
+
+    var preferred = try DerivedConfig.init(alloc, &cfg);
+    defer preferred.deinit();
+    var old_key = try Key.init(alloc, &preferred, .{ .points = 12 });
+    defer old_key.deinit();
+    try testing.expectEqual(@as(usize, 4), old_key.descriptors.len);
+    for (old_key.descriptors) |desc| try testing.expect(desc.fontconfig_monospace);
+
+    cfg.@"font-family-prefer-monospace" = false;
+    var relaxed = try DerivedConfig.init(alloc, &cfg);
+    defer relaxed.deinit();
+    var new_key = try Key.init(alloc, &relaxed, .{ .points = 12 });
+    defer new_key.deinit();
+    try testing.expectEqual(@as(usize, 4), new_key.descriptors.len);
+    for (new_key.descriptors) |desc| try testing.expect(!desc.fontconfig_monospace);
+    try testing.expect(old_key.hashcode() != new_key.hashcode());
 }
 
 test "Key different font points" {

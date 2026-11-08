@@ -57,6 +57,10 @@ pub const Descriptor = struct {
     italic: bool = false,
     monospace: bool = false,
 
+    /// Add Fontconfig's mono spacing preference even for a specific family.
+    /// Separate from monospace because this must not affect Core Text sorting.
+    fontconfig_monospace: bool = true,
+
     /// Variation axes to apply to the font. This also impacts searching
     /// for fonts since fonts with the ability to set these variations
     /// will be preferred, but not guaranteed.
@@ -73,6 +77,7 @@ pub const Descriptor = struct {
         autoHash(hasher, self.bold);
         autoHash(hasher, self.italic);
         autoHash(hasher, self.monospace);
+        autoHash(hasher, self.fontconfig_monospace);
         autoHash(hasher, self.variations.len);
         for (self.variations) |variation| {
             autoHash(hasher, variation.id);
@@ -139,10 +144,14 @@ pub const Descriptor = struct {
             false,
         ));
 
-        // For fontconfig, we always add monospace in the pattern. Since
-        // fontconfig sorts by closeness to the pattern, this doesn't fully
-        // exclude non-monospace but helps prefer it.
-        assert(pat.add(
+        // Allow configured families to opt out of the mono preference.
+        // CJK terminal fonts can
+        // correctly report FC_DUAL (90) instead of FC_MONO (100), and the
+        // spacing preference can otherwise select an unrelated family.
+        // Keep the preference for the generic monospace family and callers
+        // that explicitly request it.
+        if (self.fontconfig_monospace or self.monospace or self.family == null or
+            std.ascii.eqlIgnoreCase(self.family.?, "monospace")) assert(pat.add(
             .spacing,
             .{ .integer = @intFromEnum(fontconfig.Spacing.mono) },
             false,
@@ -904,6 +913,36 @@ test "fontconfig" {
     defer fc.deinit();
     var it = try fc.discover(alloc, .{ .family = "monospace", .size = 12 });
     defer it.deinit();
+}
+
+test "fontconfig explicit family spacing" {
+    if (options.backend != .fontconfig_freetype) return error.SkipZigTest;
+
+    const testing = std.testing;
+    _ = fontconfig.init();
+
+    // A dual-width CJK family must not acquire a conflicting mono preference.
+    const named = (Descriptor{
+        .family = "Maple Mono Normal NF CN",
+        .fontconfig_monospace = false,
+    }).toFcPattern();
+    defer named.destroy();
+    try testing.expectError(error.FontconfigNoMatch, named.get(.spacing, 0));
+    try testing.expectEqualStrings("Maple Mono Normal NF CN", (try named.get(.family, 0)).string);
+
+    // Automatic fallback, the generic family, and an explicit monospace
+    // request retain the existing preference.
+    for ([_]Descriptor{
+        .{ .family = "Maple Mono Normal NF CN" },
+        .{ .codepoint = 'A', .fontconfig_monospace = false },
+        .{ .family = "monospace", .fontconfig_monospace = false },
+        .{ .family = "Monospace", .fontconfig_monospace = false },
+        .{ .family = "Maple Mono Normal NF CN", .monospace = true, .fontconfig_monospace = false },
+    }) |desc| {
+        const pat = desc.toFcPattern();
+        defer pat.destroy();
+        try testing.expectEqual(@as(i32, @intFromEnum(fontconfig.Spacing.mono)), (try pat.get(.spacing, 0)).integer);
+    }
 }
 
 test "fontconfig codepoint" {

@@ -80,7 +80,7 @@ ENV PATH=/opt/blueprint/bin:${PATH}
 
 FROM toolchain AS builder
 
-ARG GHOSTTY_VERSION=1.3.1-patched.2
+ARG GHOSTTY_VERSION=1.3.1-patched.3
 
 WORKDIR /src
 COPY . /src
@@ -102,7 +102,8 @@ RUN --mount=type=cache,id=ghostty-zig-global-v3,target=/var/cache/zig \
 RUN patchelf --set-rpath '$ORIGIN/../lib' /out/usr/bin/ghostty && \
     install -Dm644 LICENSE /out/usr/share/doc/ghostty/LICENSE && \
     install -Dm644 PATCH1.md /out/usr/share/doc/ghostty/PATCH1.md && \
-    install -Dm644 PATCH2.md /out/usr/share/doc/ghostty/PATCH2.md
+    install -Dm644 PATCH2.md /out/usr/share/doc/ghostty/PATCH2.md && \
+    install -Dm644 PATCH3.md /out/usr/share/doc/ghostty/PATCH3.md
 
 COPY dist/linux/docker/control.in /tmp/control.in
 COPY dist/linux/docker/postinst /tmp/debian-postinst
@@ -120,7 +121,8 @@ RUN mkdir -p /out/DEBIAN && \
 
 FROM builder AS test
 
-ARG GHOSTTY_VERSION=1.3.1-patched.2
+ARG GHOSTTY_VERSION=1.3.1-patched.3
+ARG GHOSTTY_TEST_FILTER=
 
 RUN --mount=type=cache,id=ghostty-zig-global-v3,target=/var/cache/zig \
     --mount=type=cache,id=ghostty-zig-local-v4,target=/src/.zig-cache \
@@ -129,6 +131,7 @@ RUN --mount=type=cache,id=ghostty-zig-global-v3,target=/var/cache/zig \
     ZIG_GLOBAL_CACHE_DIR=/var/cache/zig \
     zig build test \
         -Dversion-string="${GHOSTTY_VERSION}" \
+        -Dtest-filter="${GHOSTTY_TEST_FILTER}" \
         -fno-sys=gtk4-layer-shell
 
 FROM scratch AS package

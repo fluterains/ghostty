@@ -169,6 +169,20 @@ language: ?[:0]const u8 = null,
 @"font-family-italic": RepeatableString = .{},
 @"font-family-bold-italic": RepeatableString = .{},
 
+/// Prefer fonts with Fontconfig `spacing=100` (FC_MONO) when matching the
+/// configured font families. This defaults to true to preserve the existing
+/// matching behavior. Fontconfig treats this as a preference, not a filter.
+///
+/// Set this to false if a configured dual-width CJK font (FC_DUAL, spacing=90)
+/// is replaced by an unrelated monospace family. This omits the extra spacing
+/// preference for specific families; Fontconfig aliases and system rules
+/// still apply. Automatic character fallback and the generic `monospace`
+/// family retain their monospace preference.
+///
+/// This applies to all four font-family styles and can be reloaded at runtime.
+/// Only used by the Fontconfig backend on Linux and FreeBSD.
+@"font-family-prefer-monospace": bool = true,
+
 /// The named font style to use for each of the requested terminal font styles.
 /// This looks up the style based on the font style string advertised by the
 /// font itself. For example, "Iosevka Heavy" has a style of "Heavy".

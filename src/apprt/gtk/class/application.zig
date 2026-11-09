@@ -2313,10 +2313,7 @@ const Action = struct {
         if (win.getActiveSurface()) |surface| {
             surface.estimateInitialSize();
             if (surface.getDefaultSize()) |size| {
-                win.as(gtk.Window).setDefaultSize(
-                    @intCast(size.width),
-                    @intCast(size.height),
-                );
+                win.setDefaultSurfaceSize(size.*);
             }
         }
 

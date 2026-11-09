@@ -1732,6 +1732,43 @@ pub const Window = extern struct {
         // We react to the changes in the propMaximized callback
     }
 
+    /// Translate a terminal-content size into the window's default size.
+    /// Adw's header and tab bars live inside the window rather than in a
+    /// GtkWindow titlebar, so GTK does not add their height for us.
+    pub fn setDefaultSurfaceSize(self: *Self, size: Surface.Size) void {
+        const insets = self.contentInsets(@intCast(size.width));
+        self.as(gtk.Window).setDefaultSize(
+            @as(c_int, @intCast(size.width)) + insets.width,
+            @as(c_int, @intCast(size.height)) + insets.height,
+        );
+    }
+
+    fn contentInsets(self: *Self, width: c_int) struct { width: c_int, height: c_int } {
+        const priv = self.private();
+        var outer: c_int = 0;
+        var inner: c_int = 0;
+        // Measure at the same width so height-for-width widgets cancel out.
+        // Measure the toolbar, not TabOverview: the latter has its own
+        // minimum height for overview mode even when the overview is closed.
+        // The toolbar includes visible header/tab bars and the debug warning.
+        priv.toolbar.as(gtk.Widget).measure(.vertical, width, &outer, null, null, null);
+        priv.tab_view.as(gtk.Widget).measure(.vertical, width, &inner, null, null, null);
+
+        // GtkWindow's default size includes its CSS border and padding. These
+        // resize insets would otherwise consume terminal columns/rows too.
+        // Read CSS directly so our own minimum-size request cannot feed back
+        // into the calculation. Server-side decorations are managed by GTK.
+        const style = self.as(gtk.Widget).getStyleContext();
+        var border: gtk.Border = undefined;
+        var padding: gtk.Border = undefined;
+        style.getBorder(&border);
+        style.getPadding(&padding);
+        return .{
+            .width = @as(c_int, border.f_left) + border.f_right + padding.f_left + padding.f_right,
+            .height = @max(0, outer - inner) + @as(c_int, border.f_top) + border.f_bottom + padding.f_top + padding.f_bottom,
+        };
+    }
+
     fn surfaceInit(
         surface: *Surface,
         self: *Self,
@@ -1744,15 +1781,13 @@ pub const Window = extern struct {
 
         // Setup our default and minimum size.
         if (surface.getDefaultSize()) |size| {
-            self.as(gtk.Window).setDefaultSize(
-                @intCast(size.width),
-                @intCast(size.height),
-            );
+            self.setDefaultSurfaceSize(size.*);
         }
         if (surface.getMinSize()) |size| {
+            const insets = self.contentInsets(@intCast(size.width));
             self.as(gtk.Widget).setSizeRequest(
-                @intCast(size.width),
-                @intCast(size.height),
+                @as(c_int, @intCast(size.width)) + insets.width,
+                @as(c_int, @intCast(size.height)) + insets.height,
             );
         }
     }
